@@ -429,7 +429,15 @@ async def on_message(message: discord.Message):
                 timestamp=datetime.utcnow(),
             )
             log_embed.set_footer(text="MONSTERBOT • Ticket Log")
-            await send_log(message.guild, log_embed)
+            # Stuur log met het ingediende Excel bestand als bijlage
+            if LOG_CHANNEL_ID:
+                log_channel = message.guild.get_channel(LOG_CHANNEL_ID)
+                if log_channel:
+                    excel_file = discord.File(
+                        io.BytesIO(file_bytes),
+                        filename=f"{message.author.name}_{datetime.now().strftime('%d-%m-%Y_%H-%M')}_{attachment.filename}"
+                    )
+                    await log_channel.send(embed=log_embed, file=excel_file)
 
     await bot.process_commands(message)
 
