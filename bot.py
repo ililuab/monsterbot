@@ -14,6 +14,7 @@ TOKEN          = os.getenv("DISCORD_TOKEN")
 GUILD_ID       = int(os.getenv("GUILD_ID", "0"))
 TICKET_CAT_ID  = int(os.getenv("TICKET_CATEGORY_ID", "0"))
 STAFF_ROLE_ID  = int(os.getenv("STAFF_ROLE_ID", "0"))
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 TEMPLATE_PATH  = os.path.join(os.path.dirname(__file__), "Clipfarming_Template.xlsx")
 
 PRICES = [
@@ -36,6 +37,15 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
+
+
+async def send_log(guild: discord.Guild, embed: discord.Embed):
+    """Stuur een log-bericht naar het log-kanaal."""
+    if not LOG_CHANNEL_ID:
+        return
+    channel = guild.get_channel(LOG_CHANNEL_ID)
+    if channel:
+        await channel.send(embed=embed)
 
 
 def calc_earnings(views: int) -> float:
@@ -244,6 +254,20 @@ async def uitbetaling(interaction: discord.Interaction):
     )
     await msg.pin()
 
+    # Log aanmaken ticket
+    log_embed = discord.Embed(
+        title="🎫 Ticket aangemaakt",
+        description=(
+            f"**Gebruiker:** {user.mention} (`{user}`)\n"
+            f"**Kanaal:** {channel.mention}\n"
+            f"**Datum:** {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+        ),
+        color=0x7b2ff7,
+        timestamp=datetime.utcnow(),
+    )
+    log_embed.set_footer(text="MONSTERBOT • Ticket Log")
+    await send_log(guild, log_embed)
+
     await interaction.followup.send(
         f"✅ Ticket aangemaakt: {channel.mention}", ephemeral=True
     )
@@ -389,6 +413,24 @@ async def on_message(message: discord.Message):
                 view=view,
             )
 
+            # Log inzending
+            log_embed = discord.Embed(
+                title="📥 Excel ingediend",
+                description=(
+                    f"**Gebruiker:** {message.author.mention} (`{message.author}`)\n"
+                    f"**Discord naam:** {data['discord_naam']}\n"
+                    f"**E-mail:** {data['email']}\n"
+                    f"**Clips:** {len(data['clips'])}\n"
+                    f"**Totaal:** €{data['total']:.2f}\n"
+                    f"**Kanaal:** {message.channel.mention}\n"
+                    f"**Datum:** {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                ),
+                color=0xf0a500,
+                timestamp=datetime.utcnow(),
+            )
+            log_embed.set_footer(text="MONSTERBOT • Ticket Log")
+            await send_log(message.guild, log_embed)
+
     await bot.process_commands(message)
 
 
@@ -419,6 +461,20 @@ class StaffApprovalView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed)
         self.stop()
+        # Log goedkeuring
+        log_embed = discord.Embed(
+            title="✅ Betaling goedgekeurd",
+            description=(
+                f"**Goedgekeurd door:** {interaction.user.mention}\n"
+                f"**Bedrag:** €{self.total:.2f}\n"
+                f"**Kanaal:** {interaction.channel.mention}\n"
+                f"**Datum:** {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+            ),
+            color=0x00c9a7,
+            timestamp=datetime.utcnow(),
+        )
+        log_embed.set_footer(text="MONSTERBOT • Ticket Log")
+        await send_log(interaction.guild, log_embed)
         await asyncio.sleep(15)
         await interaction.channel.delete(reason="Betaling goedgekeurd en verwerkt")
 
@@ -448,6 +504,20 @@ class RejectModal(discord.ui.Modal, title="Afwijzingsreden"):
             color=0xff4444,
         )
         await interaction.response.send_message(embed=embed)
+        # Log afwijzing
+        log_embed = discord.Embed(
+            title="❌ Betaling afgewezen",
+            description=(
+                f"**Afgewezen door:** {interaction.user.mention}\n"
+                f"**Reden:** {self.reden.value}\n"
+                f"**Kanaal:** {interaction.channel.mention}\n"
+                f"**Datum:** {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+            ),
+            color=0xff4444,
+            timestamp=datetime.utcnow(),
+        )
+        log_embed.set_footer(text="MONSTERBOT • Ticket Log")
+        await send_log(interaction.guild, log_embed)
 
 
 # ─────────────────────────────────────────────
