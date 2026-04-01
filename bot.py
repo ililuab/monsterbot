@@ -217,7 +217,6 @@ def parse_submission(file_bytes):
                 total_views += floored
 
                 link = sanitize(link_val, 200)
-                # Alleen http(s) links toestaan
                 if link and not link.startswith(("http://", "https://")):
                     link = "Ongeldige link"
 
@@ -296,7 +295,6 @@ def build_prijslijst_embed():
 
 def bot_closed_embed():
     now      = datetime.now()
-    last_day = calendar.monthrange(now.year, now.month)[1]
     next_month = MONTHS_NL[now.month % 12]
     return discord.Embed(
         title="Bot momenteel gesloten",
@@ -332,9 +330,7 @@ class PaymentModal(discord.ui.Modal, title="Betaalvoorkeur"):
 #  TICKET AANMAKEN
 # ─────────────────────────────────────────────
 @tree.command(name="uitbetaling", description="Maak een betalingsticket aan om je clip-verdiensten in te dienen.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def uitbetaling(interaction):
-    # Tijdslot check — alleen eerste 4 dagen of als staff het open heeft gezet
+async def uitbetaling(interaction: discord.Interaction):
     if not is_bot_open() and not is_staff(interaction.user):
         await interaction.response.send_message(embed=bot_closed_embed(), ephemeral=True)
         return
@@ -483,7 +479,6 @@ class PaymentProcessView(discord.ui.View):
             await interaction.response.send_message("Alleen staff mag dit doen.", ephemeral=True)
             return
 
-        # 1. Log de actie
         log_embed = discord.Embed(
             title="✅ Betaling Voltooid",
             description=(
@@ -496,12 +491,9 @@ class PaymentProcessView(discord.ui.View):
             timestamp=datetime.utcnow()
         )
         await send_log(interaction.guild, log_embed)
-
-        # 2. Verwijder het bericht uit het kanaal
         await interaction.message.delete()
-        
-        # 3. Optioneel: Bevestiging naar het stafflid (ephemeral)
         log.info(f"Betaling aan {self.discord_naam} voltooid door {interaction.user}")
+
 # ─────────────────────────────────────────────
 #  STAFF APPROVAL KNOPPEN
 # ─────────────────────────────────────────────
@@ -533,7 +525,6 @@ class StaffApprovalView(discord.ui.View):
         await interaction.response.send_message(embed=embed)
         self.stop()
 
-        # Betaalkanaal
         if PAYMENT_CH_ID:
             try:
                 pay_ch = interaction.guild.get_channel(PAYMENT_CH_ID)
@@ -547,13 +538,11 @@ class StaffApprovalView(discord.ui.View):
                     pay_embed.add_field(name="Goedgekeurd door", value=interaction.user.mention, inline=True)
                     pay_embed.set_footer(text="Klik op de knop hieronder als het is overgemaakt.")
 
-                    # HIER VOEGEN WE DE NIEUWE VIEW TOE:
                     pay_view = PaymentProcessView(
                         user_id=self.user_id, 
                         bedrag=f"EUR {self.total:.2f}", 
                         discord_naam=self.discord_naam
                     )
-                    
                     await pay_ch.send(embed=pay_embed, view=pay_view)
             except Exception as e:
                 log.error(f"Fout bij sturen naar betaalkanaal: {e}")
@@ -593,7 +582,6 @@ class StaffApprovalView(discord.ui.View):
             await interaction.response.send_message("Alleen staff.", ephemeral=True)
             return
         try:
-            # Hernoem kanaal met prefix zodat het duidelijk is
             new_name = f"nakijken-{interaction.channel.name.replace('ticket-', '')}"
             await interaction.channel.edit(name=new_name)
         except Exception as e:
@@ -667,10 +655,6 @@ async def on_message(message):
     for attachment in message.attachments:
         if not attachment.filename.lower().endswith((".xlsx", ".xls")):
             continue
-        if attachment.size > 5 * 1024 * 1024:
-            await message.channel.send("Bestand te groot (max 5MB).")
-            continue
-
         try:
             file_bytes = await attachment.read()
         except Exception as e:
@@ -679,7 +663,6 @@ async def on_message(message):
             continue
 
         data = parse_submission(file_bytes)
-
         if not data:
             embed = discord.Embed(
                 title="Bestand niet leesbaar",
@@ -689,7 +672,6 @@ async def on_message(message):
             await message.channel.send(embed=embed)
             continue
 
-        # Betaalinfo uit channel topic
         topic          = message.channel.topic or ""
         betaalmethode  = "Onbekend"
         betaalgegevens = "Onbekend"
@@ -724,7 +706,6 @@ async def on_message(message):
             log.error(f"Fout bij sturen summary: {e}")
             continue
 
-        # Log + bijlage
         log_embed = discord.Embed(
             title="Excel ingediend",
             description=(
@@ -742,10 +723,7 @@ async def on_message(message):
             try:
                 log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
                 if log_ch:
-                    excel_file = discord.File(
-                        io.BytesIO(file_bytes),
-                        filename=f"{message.author.name}_{datetime.now().strftime('%d-%m-%Y_%H-%M')}.xlsx"
-                    )
+                    excel_file = discord.File(io.BytesIO(file_bytes), filename=f"{message.author.name}_{datetime.now().strftime('%d-%m-%Y_%H-%M')}.xlsx")
                     await log_ch.send(embed=log_embed, file=excel_file)
             except Exception as e:
                 log.error(f"Fout bij log Excel upload: {e}")
@@ -766,17 +744,11 @@ async def post_leaderboard(guild, month_key):
             return
         data = load_data()
         if month_key not in data or not data[month_key]:
-            log.info(f"Geen leaderboard data voor {month_key}")
             return
         entries    = sorted(data[month_key].values(), key=lambda x: x["views"], reverse=True)[:10]
         year, month = month_key.split("-")
         month_name  = MONTHS_NL[int(month) - 1]
-        embed = discord.Embed(
-            title=f"Leaderboard - {month_name} {year}",
-            description="Top 10 clippers van de maand.",
-            color=0xf0a500,
-            timestamp=datetime.utcnow(),
-        )
+        embed = discord.Embed(title=f"Leaderboard - {month_name} {year}", color=0xf0a500, timestamp=datetime.utcnow())
         medals = ["1","2","3","4","5","6","7","8","9","10"]
         views_lines = []
         earn_lines  = []
@@ -786,17 +758,12 @@ async def post_leaderboard(guild, month_key):
             earn_lines.append( f"#{m} **{entry['naam']}** - EUR {entry['earnings']:.2f}")
         embed.add_field(name="Views",       value="\n".join(views_lines) or "Geen data", inline=True)
         embed.add_field(name="Verdiensten", value="\n".join(earn_lines)  or "Geen data", inline=True)
-        embed.set_footer(text="MONSTERBOT - Maandelijks Leaderboard")
         await channel.send(embed=embed)
-        data.pop(month_key, None)
-        save_data(data)
-        log.info(f"Leaderboard gepost voor {month_key}")
     except Exception as e:
         log.error(f"post_leaderboard fout: {e}")
 
 @tree.command(name="leaderboard", description="[Staff] Post het leaderboard van de huidige maand.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def leaderboard_cmd(interaction):
+async def leaderboard_cmd(interaction: discord.Interaction):
     if not is_staff(interaction.user):
         await interaction.response.send_message("Alleen staff.", ephemeral=True)
         return
@@ -816,138 +783,64 @@ async def check_monthly_leaderboard():
         log.error(f"check_monthly_leaderboard fout: {e}")
 
 # ─────────────────────────────────────────────
-#  STAFF COMMANDS
+#  STAFF COMMANDS (GLOBAL)
 # ─────────────────────────────────────────────
 @tree.command(name="bot_aan", description="[Staff] Zet de bot aan voor alle gebruikers.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def bot_aan(interaction):
+async def bot_aan(interaction: discord.Interaction):
     if not is_staff(interaction.user):
         await interaction.response.send_message("Alleen staff.", ephemeral=True)
         return
-    state = load_state()
-    state["bot_enabled"] = True
-    save_state(state)
-    embed = discord.Embed(
-        title="Bot ingeschakeld",
-        description="Alle gebruikers kunnen nu tickets aanmaken.",
-        color=0x00c9a7,
-    )
-    await interaction.response.send_message(embed=embed)
-    log.info(f"Bot ingeschakeld door {interaction.user}")
+    state = load_state(); state["bot_enabled"] = True; save_state(state)
+    await interaction.response.send_message("Bot ingeschakeld.")
 
 @tree.command(name="bot_uit", description="[Staff] Zet de bot uit voor alle gebruikers.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def bot_uit(interaction):
+async def bot_uit(interaction: discord.Interaction):
     if not is_staff(interaction.user):
         await interaction.response.send_message("Alleen staff.", ephemeral=True)
         return
-    state = load_state()
-    state["bot_enabled"] = False
-    save_state(state)
-    embed = discord.Embed(
-        title="Bot uitgeschakeld",
-        description="Alleen staff kan nu nog tickets aanmaken.",
-        color=0xff4444,
-    )
-    await interaction.response.send_message(embed=embed)
-    log.info(f"Bot uitgeschakeld door {interaction.user}")
+    state = load_state(); state["bot_enabled"] = False; save_state(state)
+    await interaction.response.send_message("Bot uitgeschakeld.")
 
 @tree.command(name="bot_status", description="[Staff] Bekijk de huidige status van de bot.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def bot_status(interaction):
+async def bot_status(interaction: discord.Interaction):
     if not is_staff(interaction.user):
         await interaction.response.send_message("Alleen staff.", ephemeral=True)
         return
-    state    = load_state()
-    enabled  = state.get("bot_enabled", True)
-    open_now = is_bot_open()
-    now      = datetime.now()
-    embed = discord.Embed(
-        title="Bot Status",
-        color=0x00c9a7 if open_now else 0xff4444,
-    )
-    embed.add_field(name="Handmatige schakelaar", value="AAN" if enabled else "UIT", inline=True)
-    embed.add_field(name="Huidige dag",           value=f"Dag {now.day}", inline=True)
-    embed.add_field(name="Open dagen",            value="Dag 1 t/m 4 van de maand", inline=True)
-    embed.add_field(name="Status voor gebruikers", value="OPEN" if open_now else "GESLOTEN", inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    state = load_state(); enabled = state.get("bot_enabled", True)
+    await interaction.response.send_message(f"Status: {'OPEN' if is_bot_open() else 'GESLOTEN'} (Handmatig: {'AAN' if enabled else 'UIT'})", ephemeral=True)
 
 @tree.command(name="betaald", description="[Staff] Markeer ticket als betaald en sluit het.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 @app_commands.describe(bedrag="Uitbetaald bedrag in euros")
-async def betaald(interaction, bedrag: str = ""):
+async def betaald(interaction: discord.Interaction, bedrag: str = ""):
     if not is_staff(interaction.user):
         await interaction.response.send_message("Alleen staff.", ephemeral=True)
         return
-    channel = interaction.channel
-    if not channel.category or channel.category.id != TICKET_CAT_ID:
-        await interaction.response.send_message("Dit is geen ticket-kanaal.", ephemeral=True)
+    if not interaction.channel.category or interaction.channel.category.id != TICKET_CAT_ID:
+        await interaction.response.send_message("Geen ticket-kanaal.", ephemeral=True)
         return
-    try:
-        bedrag_clean = sanitize(bedrag, 20)
-        embed = discord.Embed(
-            title="Betaling verwerkt",
-            description=(
-                f"**Bedrag:** EUR {bedrag_clean}\n"
-                f"**Door:** {interaction.user.mention}\n"
-                f"**Datum:** {datetime.now().strftime('%d %B %Y')}\n\n"
-                "Ticket sluit in 10 seconden."
-            ),
-            color=0x00c9a7,
-            timestamp=datetime.utcnow(),
-        )
-        await interaction.response.send_message(embed=embed)
-        await asyncio.sleep(10)
-        await channel.delete(reason=f"Betaald door {interaction.user}")
-    except Exception as e:
-        log.error(f"betaald command fout: {e}")
+    await interaction.response.send_message(f"Betaald: EUR {bedrag}. Sluiten in 10s...")
+    await asyncio.sleep(10)
+    await interaction.channel.delete()
 
 @tree.command(name="afwijzen", description="[Staff] Wijs een betalingsverzoek af met reden.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 @app_commands.describe(reden="Reden voor afwijzing")
-async def afwijzen(interaction, reden: str = "Geen reden opgegeven"):
+async def afwijzen(interaction: discord.Interaction, reden: str = "Geen reden"):
     if not is_staff(interaction.user):
         await interaction.response.send_message("Alleen staff.", ephemeral=True)
         return
-    channel = interaction.channel
-    if not channel.category or channel.category.id != TICKET_CAT_ID:
-        await interaction.response.send_message("Dit is geen ticket-kanaal.", ephemeral=True)
+    if not interaction.channel.category or interaction.channel.category.id != TICKET_CAT_ID:
+        await interaction.response.send_message("Geen ticket-kanaal.", ephemeral=True)
         return
-    embed = discord.Embed(
-        title="Betalingsverzoek Afgewezen",
-        description=f"**Reden:** {sanitize(reden, 500)}\n**Door:** {interaction.user.mention}",
-        color=0xff4444,
-        timestamp=datetime.utcnow(),
-    )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(f"Afgewezen: {reden}")
 
 # ─────────────────────────────────────────────
-#  ERROR HANDLERS
-# ─────────────────────────────────────────────
-@tree.error
-async def on_app_command_error(interaction, error):
-    log.error(f"Slash command fout ({interaction.command.name if interaction.command else 'unknown'}): {error}")
-    try:
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Er ging iets mis. Probeer het later opnieuw.", ephemeral=True)
-        else:
-            await interaction.followup.send("Er ging iets mis.", ephemeral=True)
-    except Exception:
-        pass
-
-@bot.event
-async def on_error(event, *args, **kwargs):
-    log.exception(f"Onverwachte fout in event '{event}'")
-
-# ─────────────────────────────────────────────
-#  BOT READY
+#  READY
 # ─────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    log.info(f"Ingelogd als {bot.user} ({bot.user.id})")
+    log.info(f"Ingelogd als {bot.user}")
     try:
-        # Dit synchroniseert de commando's globaal (kan tot een uur duren, maar is betrouwbaarder)
-        synced = await tree.sync() 
+        synced = await tree.sync()
         log.info(f"{len(synced)} slash commands globaal gesynchroniseerd")
     except Exception as e:
         log.error(f"Sync mislukt: {e}")
