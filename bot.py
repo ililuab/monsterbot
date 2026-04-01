@@ -466,7 +466,42 @@ class TicketCloseView(discord.ui.View):
             await interaction.channel.delete(reason=f"Gesloten door {interaction.user}")
         except Exception as e:
             log.error(f"Kon ticket niet sluiten: {e}")
+            
+# ─────────────────────────────────────────────
+#  BETAAL KANAAL KNOP (VOOR STAFF)
+# ─────────────────────────────────────────────
+class PaymentProcessView(discord.ui.View):
+    def __init__(self, user_id, bedrag, discord_naam):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.bedrag = bedrag
+        self.discord_naam = discord_naam
 
+    @discord.ui.button(label="Betalen", style=discord.ButtonStyle.primary, emoji="💸", custom_id="mark_as_paid")
+    async def mark_as_paid(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction.user):
+            await interaction.response.send_message("Alleen staff mag dit doen.", ephemeral=True)
+            return
+
+        # 1. Log de actie
+        log_embed = discord.Embed(
+            title="✅ Betaling Voltooid",
+            description=(
+                f"**Stafflid:** {interaction.user.mention}\n"
+                f"**Ontvanger:** <@{self.user_id}> ({self.discord_naam})\n"
+                f"**Bedrag:** {self.bedrag}\n"
+                f"**Status:** Uitbetaald en verwijderd uit lijst."
+            ),
+            color=0x2ecc71,
+            timestamp=datetime.utcnow()
+        )
+        await send_log(interaction.guild, log_embed)
+
+        # 2. Verwijder het bericht uit het kanaal
+        await interaction.message.delete()
+        
+        # 3. Optioneel: Bevestiging naar het stafflid (ephemeral)
+        log.info(f"Betaling aan {self.discord_naam} voltooid door {interaction.user}")
 # ─────────────────────────────────────────────
 #  STAFF APPROVAL KNOPPEN
 # ─────────────────────────────────────────────
@@ -503,16 +538,23 @@ class StaffApprovalView(discord.ui.View):
             try:
                 pay_ch = interaction.guild.get_channel(PAYMENT_CH_ID)
                 if pay_ch:
-                    pay_embed = discord.Embed(title="Betaling verwerken", color=0x00c9a7, timestamp=datetime.utcnow())
+                    pay_embed = discord.Embed(title="Nieuwe uitbetaling vereist", color=0x00c9a7, timestamp=datetime.utcnow())
                     pay_embed.add_field(name="Naam",           value=self.discord_naam,         inline=True)
                     pay_embed.add_field(name="Discord",        value=f"<@{self.user_id}>",      inline=True)
                     pay_embed.add_field(name="Bedrag",         value=f"EUR {self.total:.2f}",   inline=True)
                     pay_embed.add_field(name="Betaalmethode",  value=self.betaalmethode,        inline=True)
                     pay_embed.add_field(name="Betaalgegevens", value=self.betaalgegevens,       inline=True)
                     pay_embed.add_field(name="Goedgekeurd door", value=interaction.user.mention, inline=True)
-                    pay_embed.add_field(name="Datum",          value=datetime.now().strftime("%d/%m/%Y %H:%M"), inline=False)
-                    pay_embed.set_footer(text="MONSTERBOT - Betalingen")
-                    await pay_ch.send(embed=pay_embed)
+                    pay_embed.set_footer(text="Klik op de knop hieronder als het is overgemaakt.")
+
+                    # HIER VOEGEN WE DE NIEUWE VIEW TOE:
+                    pay_view = PaymentProcessView(
+                        user_id=self.user_id, 
+                        bedrag=f"EUR {self.total:.2f}", 
+                        discord_naam=self.discord_naam
+                    )
+                    
+                    await pay_ch.send(embed=pay_embed, view=pay_view)
             except Exception as e:
                 log.error(f"Fout bij sturen naar betaalkanaal: {e}")
 
