@@ -545,7 +545,7 @@ class StaffApprovalView(discord.ui.View):
             return
         await interaction.response.send_modal(RejectModal())
 
-    @discord.ui.button(label="Moet worden nagekeken", style=discord.ButtonStyle.secondary, custom_id="review_pay")
+    @discord.ui.button(label="Nakijken", style=discord.ButtonStyle.secondary, custom_id="review_pay")
     async def review(self, interaction, button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("Alleen staff.", ephemeral=True)
