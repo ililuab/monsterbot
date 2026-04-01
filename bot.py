@@ -44,7 +44,7 @@ STAFF_ROLE_ID      = get_env_int("STAFF_ROLE_ID")
 LOG_CHANNEL_ID     = get_env_int("LOG_CHANNEL_ID")
 LEADERBOARD_CH_ID  = get_env_int("LEADERBOARD_CHANNEL_ID")
 PAYMENT_CH_ID      = get_env_int("PAYMENT_CHANNEL_ID")
-TEMPLATE_PATH      = os.path.join(os.path.dirname(__file__), "Clipfarming_Template.xlsx")
+TEMPLATE_PATH      = os.path.join(os.path.dirname(__file__), "Clipfarming_Verdiensten_2026.xlsx")
 DATA_FILE          = os.path.join(os.path.dirname(__file__), "monthly_data.json")
 STATE_FILE         = os.path.join(os.path.dirname(__file__), "bot_state.json")
 
