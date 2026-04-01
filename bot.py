@@ -171,7 +171,19 @@ def sanitize(text, max_len=200):
     return clean[:max_len]
 
 def parse_submission(file_bytes):
-    """Parse het ingediende Excel bestand veilig."""
+    """
+    Parse het ingediende Excel bestand.
+
+    Nieuw template-formaat (Clipfarming_Verdiensten_2026.xlsx):
+      Rij 1: Titel (A1) + Prijslijst header (H1)
+      Rij 2: Waarschuwing
+      Rij 3: Kolomkoppen — A=Discord Naam, B=E-mail, C=Platform, D=Link/URL, E=Views, F=Verdiensten (€)
+      Rij 4+: Data (Discord naam en e-mail alleen in rij 4, rest van de rijen alleen Platform/Link/Views)
+
+    De Views-kolom (E) bevat de werkelijke views ingevuld door de gebruiker.
+    De Verdiensten-kolom (F) bevat een formule, maar wordt bij read_only/data_only=False
+    niet berekend — we berekenen het zelf via calc_earnings().
+    """
     if len(file_bytes) > 5 * 1024 * 1024:  # max 5MB
         log.warning("Ingediend bestand te groot (>5MB)")
         return None
@@ -187,41 +199,55 @@ def parse_submission(file_bytes):
     discord_naam = None
     email        = None
 
-    for sheet_name in wb.sheetnames[:12]:  # max 12 sheets
+    for sheet_name in wb.sheetnames[:12]:  # max 12 sheets (één per maand)
         try:
             ws = wb[sheet_name]
-            for row in ws.iter_rows(min_row=4, max_row=18, max_col=6):
+            # Rij 3 = headers, data begint op rij 4
+            # max_col=6 → kolommen A t/m F
+            for row in ws.iter_rows(min_row=4, max_row=200, max_col=6):
                 naam_cell    = row[0].value if len(row) > 0 else None
                 email_cell   = row[1].value if len(row) > 1 else None
                 platform_val = row[2].value if len(row) > 2 else None
                 link_val     = row[3].value if len(row) > 3 else None
                 views_val    = row[4].value if len(row) > 4 else None
 
-                if not views_val or str(views_val).strip() in ("", "Views (werkelijk)"):
+                # Sla rijen over zonder views-waarde of met placeholder-tekst
+                if not views_val or str(views_val).strip() in ("", "Views (werkelijk)", "Views"):
                     continue
+
+                # Sla rijen over met placeholder-tekst in de views-kolom
+                views_str = str(views_val).strip()
+                if views_str.startswith("[") or views_str.startswith("="):
+                    continue
+
                 try:
-                    views = int(str(views_val).replace(".", "").replace(",", ""))
-                    if views < 0 or views > 100_000_000:
+                    views = int(str(views_val).replace(".", "").replace(",", "").replace(" ", ""))
+                    if views <= 0 or views > 100_000_000:
                         continue
                 except (ValueError, OverflowError):
                     continue
 
-                if not discord_naam and naam_cell and "[Vul" not in str(naam_cell):
-                    discord_naam = sanitize(naam_cell, 50)
-                if not email and email_cell and "[Vul" not in str(email_cell):
-                    email = sanitize(email_cell, 100)
+                # Discord naam en e-mail staan alleen in de eerste data-rij (rij 4)
+                if not discord_naam and naam_cell:
+                    naam_str = str(naam_cell).strip()
+                    if "[Vul" not in naam_str and naam_str:
+                        discord_naam = sanitize(naam_str, 50)
+                if not email and email_cell:
+                    email_str = str(email_cell).strip()
+                    if "[Vul" not in email_str and email_str:
+                        email = sanitize(email_str, 100)
 
                 floored = (views // 10_000) * 10_000
                 earning = calc_earnings(floored)
                 total  += earning
                 total_views += floored
 
-                link = sanitize(link_val, 200)
+                link = sanitize(link_val, 200) if link_val else ""
                 if link and not link.startswith(("http://", "https://")):
                     link = "Ongeldige link"
 
                 results.append({
-                    "platform": sanitize(platform_val, 30),
+                    "platform": sanitize(platform_val, 30) if platform_val else "Onbekend",
                     "link":     link,
                     "views":    views,
                     "floored":  floored,
@@ -230,6 +256,10 @@ def parse_submission(file_bytes):
 
                 if len(results) >= 20:
                     break
+
+            if len(results) >= 20:
+                break
+
         except Exception as e:
             log.warning(f"Fout bij lezen sheet {sheet_name}: {e}")
             continue
