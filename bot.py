@@ -946,9 +946,9 @@ async def on_error(event, *args, **kwargs):
 async def on_ready():
     log.info(f"Ingelogd als {bot.user} ({bot.user.id})")
     try:
-        guild  = discord.Object(id=GUILD_ID)
-        synced = await tree.sync(guild=guild)
-        log.info(f"{len(synced)} slash commands gesynchroniseerd")
+        # Dit synchroniseert de commando's globaal (kan tot een uur duren, maar is betrouwbaarder)
+        synced = await tree.sync() 
+        log.info(f"{len(synced)} slash commands globaal gesynchroniseerd")
     except Exception as e:
         log.error(f"Sync mislukt: {e}")
     check_monthly_leaderboard.start()
