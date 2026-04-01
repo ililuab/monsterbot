@@ -318,7 +318,7 @@ class PaymentModal(discord.ui.Modal, title="Betaalvoorkeur"):
         max_length=50,
     )
     betaalgegevens = discord.ui.TextInput(
-        label="Betaalgegevens (e-mail / IBAN / telefoonnummer)",
+        label="Betaalgegevens (e-mail/IBAN/telefoon)", 
         placeholder="Bijv. naam@email.com of NL00BANK0123456789",
         required=True,
         max_length=150,
