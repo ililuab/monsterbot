@@ -156,6 +156,15 @@ async def send_log(guild, embed, file=None):
     except Exception as e:
         log.error(f"send_log fout: {e}")
 
+async def send_dm(user, embed):
+    """Stuur een DM naar een gebruiker. Logt een waarschuwing als DMs uitstaan."""
+    try:
+        await user.send(embed=embed)
+    except discord.Forbidden:
+        log.warning(f"Kon geen DM sturen naar {user} — DMs waarschijnlijk uitgeschakeld")
+    except Exception as e:
+        log.error(f"send_dm fout voor {user}: {e}")
+
 def is_staff(member):
     if not STAFF_ROLE_ID:
         return False
@@ -324,7 +333,7 @@ def build_prijslijst_embed():
     return embed
 
 def bot_closed_embed():
-    now      = datetime.now()
+    now        = datetime.now()
     next_month = MONTHS_NL[now.month % 12]
     return discord.Embed(
         title="Bot momenteel gesloten",
@@ -346,7 +355,7 @@ class PaymentModal(discord.ui.Modal, title="Betaalvoorkeur"):
         max_length=50,
     )
     betaalgegevens = discord.ui.TextInput(
-        label="Betaalgegevens (e-mail/IBAN/telefoon)", 
+        label="Betaalgegevens (e-mail/IBAN/telefoon)",
         placeholder="Bijv. naam@email.com of NL00BANK0123456789",
         required=True,
         max_length=150,
@@ -492,15 +501,15 @@ class TicketCloseView(discord.ui.View):
             await interaction.channel.delete(reason=f"Gesloten door {interaction.user}")
         except Exception as e:
             log.error(f"Kon ticket niet sluiten: {e}")
-            
+
 # ─────────────────────────────────────────────
 #  BETAAL KANAAL KNOP (VOOR STAFF)
 # ─────────────────────────────────────────────
 class PaymentProcessView(discord.ui.View):
     def __init__(self, user_id, bedrag, discord_naam):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.bedrag = bedrag
+        self.user_id      = user_id
+        self.bedrag       = bedrag
         self.discord_naam = discord_naam
 
     @discord.ui.button(label="Betalen", style=discord.ButtonStyle.primary, emoji="💸", custom_id="mark_as_paid")
@@ -555,22 +564,43 @@ class StaffApprovalView(discord.ui.View):
         await interaction.response.send_message(embed=embed)
         self.stop()
 
+        # ── DM naar de gebruiker ──────────────────────────────────────
+        try:
+            member = interaction.guild.get_member(self.user_id) or await interaction.guild.fetch_member(self.user_id)
+            dm_embed = discord.Embed(
+                title="✅ Betaalverzoek goedgekeurd!",
+                description=(
+                    f"Hey **{self.discord_naam}**, je betaalverzoek is goedgekeurd!\n\n"
+                    f"**Bedrag:** EUR {self.total:.2f}\n"
+                    f"**Betaalmethode:** {self.betaalmethode}\n"
+                    f"**Betaalgegevens:** {self.betaalgegevens}\n\n"
+                    "Je wordt zo snel mogelijk uitbetaald. Bedankt voor je clips! 🎬"
+                ),
+                color=0x00c9a7,
+                timestamp=datetime.utcnow(),
+            )
+            dm_embed.set_footer(text="MONSTERBOT — MonsterTube Clipfarming")
+            await send_dm(member, dm_embed)
+        except Exception as e:
+            log.warning(f"Kon member niet ophalen voor DM: {e}")
+        # ─────────────────────────────────────────────────────────────
+
         if PAYMENT_CH_ID:
             try:
                 pay_ch = interaction.guild.get_channel(PAYMENT_CH_ID)
                 if pay_ch:
                     pay_embed = discord.Embed(title="Nieuwe uitbetaling vereist", color=0x00c9a7, timestamp=datetime.utcnow())
-                    pay_embed.add_field(name="Naam",           value=self.discord_naam,         inline=True)
-                    pay_embed.add_field(name="Discord",        value=f"<@{self.user_id}>",      inline=True)
-                    pay_embed.add_field(name="Bedrag",         value=f"EUR {self.total:.2f}",   inline=True)
-                    pay_embed.add_field(name="Betaalmethode",  value=self.betaalmethode,        inline=True)
-                    pay_embed.add_field(name="Betaalgegevens", value=self.betaalgegevens,       inline=True)
-                    pay_embed.add_field(name="Goedgekeurd door", value=interaction.user.mention, inline=True)
+                    pay_embed.add_field(name="Naam",             value=self.discord_naam,           inline=True)
+                    pay_embed.add_field(name="Discord",          value=f"<@{self.user_id}>",        inline=True)
+                    pay_embed.add_field(name="Bedrag",           value=f"EUR {self.total:.2f}",     inline=True)
+                    pay_embed.add_field(name="Betaalmethode",    value=self.betaalmethode,          inline=True)
+                    pay_embed.add_field(name="Betaalgegevens",   value=self.betaalgegevens,         inline=True)
+                    pay_embed.add_field(name="Goedgekeurd door", value=interaction.user.mention,    inline=True)
                     pay_embed.set_footer(text="Klik op de knop hieronder als het is overgemaakt.")
 
                     pay_view = PaymentProcessView(
-                        user_id=self.user_id, 
-                        bedrag=f"EUR {self.total:.2f}", 
+                        user_id=self.user_id,
+                        bedrag=f"EUR {self.total:.2f}",
                         discord_naam=self.discord_naam
                     )
                     await pay_ch.send(embed=pay_embed, view=pay_view)
@@ -604,7 +634,7 @@ class StaffApprovalView(discord.ui.View):
         if not is_staff(interaction.user):
             await interaction.response.send_message("Alleen staff.", ephemeral=True)
             return
-        await interaction.response.send_modal(RejectModal())
+        await interaction.response.send_modal(RejectModal(self.user_id, self.discord_naam))
 
     @discord.ui.button(label="Nakijken", style=discord.ButtonStyle.secondary, custom_id="review_pay")
     async def review(self, interaction, button):
@@ -641,6 +671,7 @@ class StaffApprovalView(discord.ui.View):
         log_embed.set_footer(text="MONSTERBOT - Ticket Log")
         await send_log(interaction.guild, log_embed)
 
+
 class RejectModal(discord.ui.Modal, title="Afwijzingsreden"):
     reden = discord.ui.TextInput(
         label="Waarom wordt dit afgewezen?",
@@ -649,14 +680,42 @@ class RejectModal(discord.ui.Modal, title="Afwijzingsreden"):
         required=True,
         max_length=500,
     )
+
+    def __init__(self, user_id: int, discord_naam: str):
+        super().__init__()
+        self.user_id      = user_id
+        self.discord_naam = discord_naam
+
     async def on_submit(self, interaction):
         reden_clean = sanitize(self.reden.value, 500)
+
+        # Embed in het ticket
         embed = discord.Embed(
             title="Afgewezen",
             description=f"**Reden:** {reden_clean}\n\nPas je inzending aan en probeer opnieuw.",
             color=0xff4444,
         )
         await interaction.response.send_message(embed=embed)
+
+        # ── DM naar de gebruiker ──────────────────────────────────────
+        try:
+            member = interaction.guild.get_member(self.user_id) or await interaction.guild.fetch_member(self.user_id)
+            dm_embed = discord.Embed(
+                title="❌ Betaalverzoek afgewezen",
+                description=(
+                    f"Hey **{self.discord_naam}**, helaas is je betaalverzoek afgewezen.\n\n"
+                    f"**Reden:** {reden_clean}\n\n"
+                    "Pas je inzending aan en maak een nieuw ticket aan."
+                ),
+                color=0xff4444,
+                timestamp=datetime.utcnow(),
+            )
+            dm_embed.set_footer(text="MONSTERBOT — MonsterTube Clipfarming")
+            await send_dm(member, dm_embed)
+        except Exception as e:
+            log.warning(f"Kon member niet ophalen voor DM bij afwijzing: {e}")
+        # ─────────────────────────────────────────────────────────────
+
         log_embed = discord.Embed(
             title="Betaling afgewezen",
             description=(
@@ -775,11 +834,11 @@ async def post_leaderboard(guild, month_key):
         data = load_data()
         if month_key not in data or not data[month_key]:
             return
-        entries    = sorted(data[month_key].values(), key=lambda x: x["views"], reverse=True)[:10]
+        entries     = sorted(data[month_key].values(), key=lambda x: x["views"], reverse=True)[:10]
         year, month = month_key.split("-")
         month_name  = MONTHS_NL[int(month) - 1]
         embed = discord.Embed(title=f"Leaderboard - {month_name} {year}", color=0xf0a500, timestamp=datetime.utcnow())
-        medals = ["1","2","3","4","5","6","7","8","9","10"]
+        medals      = ["1","2","3","4","5","6","7","8","9","10"]
         views_lines = []
         earn_lines  = []
         for i, entry in enumerate(entries):
