@@ -296,16 +296,35 @@ def build_summary_embed(data, user):
         color=0x7b2ff7,
         timestamp=datetime.utcnow(),
     )
+    
     clips = data["clips"]
-    lines = []
+    current_field_content = ""
+    field_count = 1
+
     for i, c in enumerate(clips[:20], 1):
         afgerond = f" *(afgerond naar {c['floored']:,})*" if c["views"] != c["floored"] else ""
-        link_display = c['link'][:60] + ('...' if len(c['link']) > 60 else '')
-        lines.append(
+        # We maken de link-display korter om ruimte te besparen
+        link_display = c['link'][:40] + ('...' if len(c['link']) > 40 else '')
+        line = (
             f"`{i}.` **{c['platform']}** | {c['views']:,} views{afgerond} - EUR {c['earning']:.2f}\n"
-            f"   {link_display}"
+            f"   {link_display}\n"
         )
-    embed.add_field(name=f"Clips ({len(clips)})", value="\n".join(lines) if lines else "Geen clips", inline=False)
+
+        # Controleer of de nieuwe lijn nog in het huidige veld past (max 1024)
+        if len(current_field_content) + len(line) > 1000:
+            embed.add_field(name=f"Clips Deel {field_count}", value=current_field_content, inline=False)
+            current_field_content = line
+            field_count += 1
+        else:
+            current_field_content += line
+
+    # Voeg het laatste (of enige) veld toe
+    if current_field_content:
+        field_name = f"Clips ({len(clips)})" if field_count == 1 else f"Clips De <br>el {field_count}"
+        embed.add_field(name=field_name, value=current_field_content, inline=False)
+    elif not clips:
+        embed.add_field(name="Clips", value="Geen clips", inline=False)
+
     embed.add_field(name="Totaal te betalen", value=f"**EUR {data['total']:.2f}**", inline=False)
     embed.set_footer(text="MONSTERBOT - Wacht op goedkeuring van staff")
     return embed
