@@ -381,23 +381,20 @@ def bot_closed_embed():
 # ─────────────────────────────────────────────
 #  BETAALVOORKEUR MODAL
 # ─────────────────────────────────────────────
-class PaymentModal(discord.ui.Modal, title="Betaalvoorkeur"):
-    betaalmethode = discord.ui.TextInput(
-        label="Betaalmethode",
-        placeholder="Bijv. PayPal, Tikkie, Bankoverschrijving...",
-        required=True,
-        max_length=50,
-    )
+class PaymentModal(discord.ui.Modal, title="Betaalgegevens"):
+    discord_naam = discord.ui.TextInput(label="Discord Naam", placeholder="bijv. dylan123", required=True)
+    email = discord.ui.TextInput(label="E-mailadres", placeholder="jouw@email.com", required=True)
     betaalgegevens = discord.ui.TextInput(
-        label="Betaalgegevens (e-mail/IBAN/telefoon)",
-        placeholder="Bijv. naam@email.com of NL00BANK0123456789",
+        label="Betaallink (Tikkie, PayPal.me, etc.)", 
+        placeholder="STUUR EEN OPEN LINK: bijv. Tikkie (zonder bedrag) of PayPal.me link",
+        style=discord.TextStyle.paragraph,
         required=True,
-        max_length=150,
+        max_length=150
     )
-    async def on_submit(self, interaction):
-        methode  = sanitize(self.betaalmethode.value, 50)
-        gegevens = sanitize(self.betaalgegevens.value, 150)
-        await create_ticket(interaction, methode, gegevens)
+
+    def __init__(self, betaalmethode):
+        super().__init__()
+        self.betaalmethode = betaalmethode
 
 # ─────────────────────────────────────────────
 #  TICKET AANMAKEN
@@ -477,11 +474,12 @@ async def create_ticket(interaction, betaalmethode, betaalgegevens):
         title="Betalingsticket aangemaakt",
         description=(
             f"Hey {user.mention}! Download het Excel-bestand hierboven en volg de stappen:\n\n"
-            "**1.** Vul het Excel-bestand in\n"
-            "**2.** Upload het ingevulde Excel-bestand in dit ticket\n"
-            "**3.** Staff verwerkt de betaling en komt zo snel mogelijk bij je terug\n\n"
-            f"**Betaalmethode:** {betaalmethode}\n"
-            f"**Betaalgegevens:** {betaalgegevens}"
+            "**1.** Vul het Excel-bestand volledig in.\n"
+            "**2.** Upload het ingevulde bestand in dit ticket.\n"
+            "**3.** **BELANGRIJK:** Zorg dat je betaallink een 'open' link is (Tikkie zonder bedrag of PayPal.me). Wij vullen het bedrag zelf in.\n\n"
+            f"**Geselecteerde methode:** {betaalmethode}\n"
+            f"**Opgegeven Link:** {betaalgegevens}\n\n"
+            "*Wacht tot een stafflid je bestand heeft gecontroleerd.*"
         ),
         color=0x7b2ff7,
         timestamp=datetime.utcnow(),
@@ -570,6 +568,30 @@ class PaymentProcessView(discord.ui.View):
 # ─────────────────────────────────────────────
 #  STAFF APPROVAL KNOPPEN
 # ─────────────────────────────────────────────
+class ConfirmReceiptView(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(label="Ik heb de betaling ontvangen ✅", style=discord.ButtonStyle.success, custom_id="confirm_received")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Alleen de aanvrager kan dit bevestigen.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("Bedankt voor de bevestiging! Dit ticket wordt over 10 seconden gesloten.")
+        
+        log_embed = discord.Embed(
+            title="Betaling Ontvangen & Ticket Gesloten",
+            description=f"Gebruiker <@{self.user_id}> heeft de ontvangst bevestigd.",
+            color=0x00c9a7,
+            timestamp=datetime.utcnow()
+        )
+        await send_log(interaction.guild, log_embed)
+        
+        await asyncio.sleep(10)
+        await interaction.channel.delete()
+
 class StaffApprovalView(discord.ui.View):
     def __init__(self, total, total_views, discord_naam, user_id, betaalmethode, betaalgegevens):
         super().__init__(timeout=None)
@@ -581,129 +603,96 @@ class StaffApprovalView(discord.ui.View):
         self.betaalgegevens = betaalgegevens
 
     @discord.ui.button(label="Goedkeuren", style=discord.ButtonStyle.success, custom_id="approve_pay")
-    async def approve(self, interaction, button):
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("Alleen staff.", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title="Goedgekeurd",
-            description=(
-                f"**Bedrag:** EUR {self.total:.2f}\n"
-                f"**Goedgekeurd door:** {interaction.user.mention}\n"
-                "Ticket sluit in 15 seconden."
-            ),
-            color=0x00c9a7,
-        )
-        await interaction.response.send_message(embed=embed)
+        # Directe feedback aan de moderator
+        await interaction.response.send_message(f"Verzoek van EUR {self.total:.2f} goedgekeurd. Betaallink is verstuurd naar administratie.", ephemeral=True)
         self.stop()
 
-        # ── DM naar de gebruiker ──────────────────────────────────────
-        try:
-            member = interaction.guild.get_member(self.user_id) or await interaction.guild.fetch_member(self.user_id)
-            dm_embed = discord.Embed(
-                title="✅ Betaalverzoek goedgekeurd!",
-                description=(
-                    f"Hey **{self.discord_naam}**, je betaalverzoek is goedgekeurd!\n\n"
-                    f"**Bedrag:** EUR {self.total:.2f}\n"
-                    f"**Betaalmethode:** {self.betaalmethode}\n"
-                    f"**Betaalgegevens:** {self.betaalgegevens}\n\n"
-                    "Je wordt zo snel mogelijk uitbetaald. Bedankt voor je clips! 🎬"
-                ),
-                color=0x00c9a7,
-                timestamp=datetime.utcnow(),
-            )
-            dm_embed.set_footer(text="MONSTERBOT — MonsterTube Clipfarming")
-            await send_dm(member, dm_embed)
-        except Exception as e:
-            log.warning(f"Kon member niet ophalen voor DM: {e}")
-        # ─────────────────────────────────────────────────────────────
-
+        # 1. Stuur naar Betaalkanaal voor de administratie
         if PAYMENT_CH_ID:
             try:
                 pay_ch = interaction.guild.get_channel(PAYMENT_CH_ID)
                 if pay_ch:
-                    pay_embed = discord.Embed(title="Nieuwe uitbetaling vereist", color=0x00c9a7, timestamp=datetime.utcnow())
-                    pay_embed.add_field(name="Naam",             value=self.discord_naam,           inline=True)
-                    pay_embed.add_field(name="Discord",          value=f"<@{self.user_id}>",        inline=True)
-                    pay_embed.add_field(name="Bedrag",           value=f"EUR {self.total:.2f}",     inline=True)
-                    pay_embed.add_field(name="Betaalmethode",    value=self.betaalmethode,          inline=True)
-                    pay_embed.add_field(name="Betaalgegevens",   value=self.betaalgegevens,         inline=True)
-                    pay_embed.add_field(name="Goedgekeurd door", value=interaction.user.mention,    inline=True)
-                    pay_embed.set_footer(text="Klik op de knop hieronder als het is overgemaakt.")
-
-                    pay_view = PaymentProcessView(
-                        user_id=self.user_id,
-                        bedrag=f"EUR {self.total:.2f}",
-                        discord_naam=self.discord_naam
+                    link_ruw = self.betaalgegevens.strip()
+                    # Maak er een klikbare link van voor de admin
+                    klikbare_link = link_ruw if link_ruw.startswith("http") else f"https://{link_ruw}"
+                    
+                    pay_embed = discord.Embed(
+                        title="💸 Uitbetaling Gereed", 
+                        description=f"Klik op de link en vul het bedrag handmatig in: **EUR {self.total:.2f}**",
+                        color=0x00c9a7, 
+                        timestamp=datetime.utcnow()
                     )
+                    pay_embed.add_field(name="Ontvanger", value=f"{self.discord_naam} (<@{self.user_id}>)", inline=True)
+                    pay_embed.add_field(name="Bedrag", value=f"**EUR {self.total:.2f}**", inline=True)
+                    pay_embed.add_field(name="BETAALLINK", value=f"**[KLIK HIER OM TE BETALEN]({klikbare_link})**", inline=False)
+                    pay_embed.set_footer(text="Klik op 'Betalen' hieronder als je klaar bent.")
+                    
+                    pay_view = PaymentProcessView(user_id=self.user_id, bedrag=f"EUR {self.total:.2f}", discord_naam=self.discord_naam)
                     await pay_ch.send(embed=pay_embed, view=pay_view)
             except Exception as e:
                 log.error(f"Fout bij sturen naar betaalkanaal: {e}")
 
+        # 2. Update Leaderboard
         add_to_leaderboard(self.discord_naam, self.user_id, self.total_views, self.total)
 
+        # 3. Log de actie in het log-kanaal
         log_embed = discord.Embed(
             title="Betaling goedgekeurd",
-            description=(
-                f"**Door:** {interaction.user.mention}\n"
-                f"**Bedrag:** EUR {self.total:.2f}\n"
-                f"**Datum:** {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-            ),
+            description=f"**Door:** {interaction.user.mention}\n**Bedrag:** EUR {self.total:.2f}\n**Ontvanger:** <@{self.user_id}>",
             color=0x00c9a7,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.utcnow()
         )
-        log_embed.set_footer(text="MONSTERBOT - Ticket Log")
         await send_log(interaction.guild, log_embed)
-        log.info(f"Betaling goedgekeurd door {interaction.user} - EUR {self.total:.2f}")
 
-        await asyncio.sleep(15)
-        try:
-            await interaction.channel.delete(reason="Betaling goedgekeurd")
-        except Exception as e:
-            log.error(f"Kon kanaal niet verwijderen na goedkeuring: {e}")
+        # 4. BERICHT VOOR DE GEBRUIKER (Ticket blijft open!)
+        confirm_embed = discord.Embed(
+            title="Betaling is onderweg! 💸",
+            description=(
+                f"Je verzoek van **EUR {self.total:.2f}** is goedgekeurd.\n"
+                "De administratie maakt het bedrag nu naar je over.\n\n"
+                "**⚠️ BEVESTIGING NODIG:**\n"
+                "Klik op de knop hieronder **zodra je het geld hebt ontvangen**.\n"
+                "Hiermee laat je ons weten dat alles goed is gegaan en **sluit je dit ticket**."
+            ),
+            color=0x7b2ff7
+        )
+        # De gebruiker krijgt nu de knop om zelf te sluiten
+        await interaction.channel.send(
+            content=f"<@{self.user_id}>", 
+            embed=confirm_embed, 
+            view=ConfirmReceiptView(user_id=self.user_id)
+        )
 
     @discord.ui.button(label="Afwijzen", style=discord.ButtonStyle.danger, custom_id="reject_pay")
-    async def reject(self, interaction, button):
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("Alleen staff.", ephemeral=True)
             return
         await interaction.response.send_modal(RejectModal(self.user_id, self.discord_naam))
 
     @discord.ui.button(label="Nakijken", style=discord.ButtonStyle.secondary, custom_id="review_pay")
-    async def review(self, interaction, button):
+    async def review(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("Alleen staff.", ephemeral=True)
             return
         try:
             new_name = f"nakijken-{interaction.channel.name.replace('ticket-', '')}"
             await interaction.channel.edit(name=new_name)
-        except Exception as e:
-            log.warning(f"Kon kanaal niet hernoemen: {e}")
-
+        except Exception:
+            pass
+        
         embed = discord.Embed(
             title="Moet worden nagekeken",
-            description=(
-                f"Dit ticket is gemarkeerd als **te nakijken** door {interaction.user.mention}.\n"
-                "Staff zal dit zo snel mogelijk controleren."
-            ),
+            description=f"Dit ticket is gemarkeerd als **na te kijken** door {interaction.user.mention}.",
             color=0xf0a500,
             timestamp=datetime.utcnow(),
         )
         await interaction.response.send_message(embed=embed)
-
-        log_embed = discord.Embed(
-            title="Ticket gemarkeerd: Nakijken",
-            description=(
-                f"**Door:** {interaction.user.mention}\n"
-                f"**Kanaal:** {interaction.channel.mention}\n"
-                f"**Datum:** {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-            ),
-            color=0xf0a500,
-            timestamp=datetime.utcnow(),
-        )
-        log_embed.set_footer(text="MONSTERBOT - Ticket Log")
-        await send_log(interaction.guild, log_embed)
 
 
 class RejectModal(discord.ui.Modal, title="Afwijzingsreden"):
