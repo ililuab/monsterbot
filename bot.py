@@ -230,10 +230,25 @@ def parse_submission(file_bytes):
                     continue
 
                 try:
-                    views = int(str(views_val).replace(".", "").replace(",", "").replace(" ", ""))
+                    # Als de waarde al een getal is (int of float), gebruik deze direct
+                    if isinstance(views_val, (int, float)):
+                        views = int(views_val)
+                    else:
+                        # Als het tekst is, voorzichtig opschonen zonder decimalen te verpesten
+                        clean_val = str(views_val).strip().replace(" ", "")
+                        
+                        # Behandel Europese notatie (1.234,56)
+                        if "," in clean_val and "." in clean_val:
+                            clean_val = clean_val.replace(".", "").replace(",", ".")
+                        elif "," in clean_val:
+                            clean_val = clean_val.replace(",", ".")
+                        
+                        # Gebruik float() eerst om decimalen zoals .0 op te vangen, daarna int()
+                        views = int(float(clean_val))
+
                     if views <= 0 or views > 100_000_000:
                         continue
-                except (ValueError, OverflowError):
+                except (ValueError, OverflowError, TypeError):
                     continue
 
                 # Discord naam en e-mail staan alleen in de eerste data-rij (rij 4)
