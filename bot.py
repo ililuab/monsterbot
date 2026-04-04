@@ -8,7 +8,7 @@ import json
 import asyncio
 import calendar
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # ─────────────────────────────────────────────
@@ -48,7 +48,6 @@ TEMPLATE_PATH      = os.path.join(os.path.dirname(__file__), "Clipfarming_Verdie
 DATA_FILE          = os.path.join(os.path.dirname(__file__), "monthly_data.json")
 STATE_FILE         = os.path.join(os.path.dirname(__file__), "bot_state.json")
 
-# Bot is beschikbaar op dag 1 t/m 4 van elke maand
 OPEN_DAYS = {1, 2, 3, 4}
 
 MONTHS_NL = [
@@ -71,7 +70,22 @@ bot  = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 # ─────────────────────────────────────────────
-#  STATE (bot aan/uit toggle)
+#  WACHTENDE BETAALLINK-VERZOEKEN
+#  { user_id: { "bedrag": float, "naam": str, "ticket_channel_id": int, "guild_id": int } }
+# ─────────────────────────────────────────────
+pending_payment_links: dict[int, dict] = {}
+
+# ─────────────────────────────────────────────
+#  HELPERS — tijd
+# ─────────────────────────────────────────────
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+def now_local() -> datetime:
+    return datetime.now()
+
+# ─────────────────────────────────────────────
+#  STATE
 # ─────────────────────────────────────────────
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -90,11 +104,10 @@ def save_state(state):
         log.error(f"Kon state niet opslaan: {e}")
 
 def is_bot_open():
-    """Bot is open als: handmatig ingeschakeld OF het zijn de eerste 4 dagen van de maand."""
     state = load_state()
     if not state.get("bot_enabled", True):
         return False
-    return datetime.now().day in OPEN_DAYS
+    return now_local().day in OPEN_DAYS
 
 # ─────────────────────────────────────────────
 #  LEADERBOARD DATA
@@ -121,7 +134,7 @@ def save_data(data):
         log.error(f"Kon data niet opslaan: {e}")
 
 def get_month_key():
-    now = datetime.now()
+    now = now_local()
     return f"{now.year}-{now.month:02d}"
 
 def add_to_leaderboard(discord_naam, user_id, views, earnings):
@@ -138,7 +151,7 @@ def add_to_leaderboard(discord_naam, user_id, views, earnings):
     save_data(data)
 
 # ─────────────────────────────────────────────
-#  HELPERS
+#  HELPERS — overig
 # ─────────────────────────────────────────────
 async def send_log(guild, embed, file=None):
     if not LOG_CHANNEL_ID:
@@ -147,23 +160,25 @@ async def send_log(guild, embed, file=None):
         ch = guild.get_channel(LOG_CHANNEL_ID)
         if not ch:
             return
-        if file:
-            await ch.send(embed=embed, file=file)
-        else:
-            await ch.send(embed=embed)
+        await (ch.send(embed=embed, file=file) if file else ch.send(embed=embed))
     except discord.Forbidden:
         log.warning("Geen toegang tot log-kanaal")
     except Exception as e:
         log.error(f"send_log fout: {e}")
 
-async def send_dm(user, embed):
-    """Stuur een DM naar een gebruiker. Logt een waarschuwing als DMs uitstaan."""
+async def send_dm(user, embed, view=None):
     try:
-        await user.send(embed=embed)
+        if view:
+            await user.send(embed=embed, view=view)
+        else:
+            await user.send(embed=embed)
+        return True
     except discord.Forbidden:
-        log.warning(f"Kon geen DM sturen naar {user} — DMs waarschijnlijk uitgeschakeld")
+        log.warning(f"Kon geen DM sturen naar {user} — DMs uitgeschakeld")
+        return False
     except Exception as e:
         log.error(f"send_dm fout voor {user}: {e}")
+        return False
 
 def is_staff(member):
     if not STAFF_ROLE_ID:
@@ -172,28 +187,17 @@ def is_staff(member):
     return role in member.roles if role else False
 
 def sanitize(text, max_len=200):
-    """Verwijder gevaarlijke tekens en beperk lengte."""
     if not text:
         return ""
     clean = str(text).strip()
     clean = clean.replace("@everyone", "").replace("@here", "")
     return clean[:max_len]
 
+# ─────────────────────────────────────────────
+#  EXCEL PARSING
+# ─────────────────────────────────────────────
 def parse_submission(file_bytes):
-    """
-    Parse het ingediende Excel bestand.
-
-    Nieuw template-formaat (Clipfarming_Verdiensten_2026.xlsx):
-      Rij 1: Titel (A1) + Prijslijst header (H1)
-      Rij 2: Waarschuwing
-      Rij 3: Kolomkoppen — A=Discord Naam, B=E-mail, C=Platform, D=Link/URL, E=Views, F=Verdiensten (€)
-      Rij 4+: Data (Discord naam en e-mail alleen in rij 4, rest van de rijen alleen Platform/Link/Views)
-
-    De Views-kolom (E) bevat de werkelijke views ingevuld door de gebruiker.
-    De Verdiensten-kolom (F) bevat een formule, maar wordt bij read_only/data_only=False
-    niet berekend — we berekenen het zelf via calc_earnings().
-    """
-    if len(file_bytes) > 5 * 1024 * 1024:  # max 5MB
+    if len(file_bytes) > 5 * 1024 * 1024:
         log.warning("Ingediend bestand te groot (>5MB)")
         return None
     try:
@@ -208,11 +212,9 @@ def parse_submission(file_bytes):
     discord_naam = None
     email        = None
 
-    for sheet_name in wb.sheetnames[:12]:  # max 12 sheets (één per maand)
+    for sheet_name in wb.sheetnames[:12]:
         try:
             ws = wb[sheet_name]
-            # Rij 3 = headers, data begint op rij 4
-            # max_col=6 → kolommen A t/m F
             for row in ws.iter_rows(min_row=4, max_row=200, max_col=6):
                 naam_cell    = row[0].value if len(row) > 0 else None
                 email_cell   = row[1].value if len(row) > 1 else None
@@ -220,38 +222,27 @@ def parse_submission(file_bytes):
                 link_val     = row[3].value if len(row) > 3 else None
                 views_val    = row[4].value if len(row) > 4 else None
 
-                # Sla rijen over zonder views-waarde of met placeholder-tekst
                 if not views_val or str(views_val).strip() in ("", "Views (werkelijk)", "Views"):
                     continue
-
-                # Sla rijen over met placeholder-tekst in de views-kolom
                 views_str = str(views_val).strip()
                 if views_str.startswith("[") or views_str.startswith("="):
                     continue
 
                 try:
-                    # Als de waarde al een getal is (int of float), gebruik deze direct
                     if isinstance(views_val, (int, float)):
                         views = int(views_val)
                     else:
-                        # Als het tekst is, voorzichtig opschonen zonder decimalen te verpesten
                         clean_val = str(views_val).strip().replace(" ", "")
-                        
-                        # Behandel Europese notatie (1.234,56)
                         if "," in clean_val and "." in clean_val:
                             clean_val = clean_val.replace(".", "").replace(",", ".")
                         elif "," in clean_val:
                             clean_val = clean_val.replace(",", ".")
-                        
-                        # Gebruik float() eerst om decimalen zoals .0 op te vangen, daarna int()
                         views = int(float(clean_val))
-
                     if views <= 0 or views > 100_000_000:
                         continue
                 except (ValueError, OverflowError, TypeError):
                     continue
 
-                # Discord naam en e-mail staan alleen in de eerste data-rij (rij 4)
                 if not discord_naam and naam_cell:
                     naam_str = str(naam_cell).strip()
                     if "[Vul" not in naam_str and naam_str:
@@ -263,7 +254,7 @@ def parse_submission(file_bytes):
 
                 floored = (views // 10_000) * 10_000
                 earning = calc_earnings(floored)
-                total  += earning
+                total       += earning
                 total_views += floored
 
                 link = sanitize(link_val, 200) if link_val else ""
@@ -280,10 +271,8 @@ def parse_submission(file_bytes):
 
                 if len(results) >= 20:
                     break
-
             if len(results) >= 20:
                 break
-
         except Exception as e:
             log.warning(f"Fout bij lezen sheet {sheet_name}: {e}")
             continue
@@ -299,6 +288,9 @@ def parse_submission(file_bytes):
         "total":        round(total, 2),
     }
 
+# ─────────────────────────────────────────────
+#  EMBEDS
+# ─────────────────────────────────────────────
 def build_summary_embed(data, user):
     embed = discord.Embed(
         title="Betalingsoverzicht - Ingediend",
@@ -306,26 +298,22 @@ def build_summary_embed(data, user):
             f"**Discord:** {sanitize(data['discord_naam'])}\n"
             f"**E-mail:** {sanitize(data['email'])}\n"
             f"**Ingediend door:** {user.mention}\n"
-            f"**Datum:** {datetime.now().strftime('%d %B %Y')}"
+            f"**Datum:** {now_local().strftime('%d %B %Y')}"
         ),
         color=0x7b2ff7,
-        timestamp=datetime.utcnow(),
+        timestamp=now_utc(),
     )
-    
     clips = data["clips"]
     current_field_content = ""
     field_count = 1
 
     for i, c in enumerate(clips[:20], 1):
         afgerond = f" *(afgerond naar {c['floored']:,})*" if c["views"] != c["floored"] else ""
-        # We maken de link-display korter om ruimte te besparen
         link_display = c['link'][:40] + ('...' if len(c['link']) > 40 else '')
         line = (
             f"`{i}.` **{c['platform']}** | {c['views']:,} views{afgerond} - EUR {c['earning']:.2f}\n"
             f"   {link_display}\n"
         )
-
-        # Controleer of de nieuwe lijn nog in het huidige veld past (max 1024)
         if len(current_field_content) + len(line) > 1000:
             embed.add_field(name=f"Clips Deel {field_count}", value=current_field_content, inline=False)
             current_field_content = line
@@ -333,9 +321,8 @@ def build_summary_embed(data, user):
         else:
             current_field_content += line
 
-    # Voeg het laatste (of enige) veld toe
     if current_field_content:
-        field_name = f"Clips ({len(clips)})" if field_count == 1 else f"Clips De <br>el {field_count}"
+        field_name = f"Clips ({len(clips)})" if field_count == 1 else f"Clips Deel {field_count}"
         embed.add_field(name=field_name, value=current_field_content, inline=False)
     elif not clips:
         embed.add_field(name="Clips", value="Geen clips", inline=False)
@@ -354,21 +341,19 @@ def build_prijslijst_embed():
         ),
         color=0x00c9a7,
     )
-    lines = [
-        "10.000 views - EUR 1",
-        "20.000 views - EUR 2  (per 10k erbij)",
-        "50.000 views - EUR 5",
-        "100.000 views - EUR 10",
-        "250.000 views - EUR 25",
-        "500.000 views - EUR 50",
-        "1.000.000 views - EUR 250",
-    ]
-    embed.add_field(name="Tarieven", value="\n".join(lines), inline=False)
+    embed.add_field(name="Tarieven", value="\n".join([
+        "10.000 views → EUR 1",
+        "20.000 views → EUR 2",
+        "50.000 views → EUR 5",
+        "100.000 views → EUR 10",
+        "250.000 views → EUR 25",
+        "500.000 views → EUR 50",
+        "1.000.000 views → EUR 250",
+    ]), inline=False)
     return embed
 
 def bot_closed_embed():
-    now        = datetime.now()
-    next_month = MONTHS_NL[now.month % 12]
+    next_month = MONTHS_NL[now_local().month % 12]
     return discord.Embed(
         title="Bot momenteel gesloten",
         description=(
@@ -381,20 +366,24 @@ def bot_closed_embed():
 # ─────────────────────────────────────────────
 #  BETAALVOORKEUR MODAL
 # ─────────────────────────────────────────────
-class PaymentModal(discord.ui.Modal, title="Betaalgegevens"):
-    discord_naam = discord.ui.TextInput(label="Discord Naam", placeholder="bijv. dylan123", required=True)
-    email = discord.ui.TextInput(label="E-mailadres", placeholder="jouw@email.com", required=True)
-    betaalgegevens = discord.ui.TextInput(
-        label="Betaallink (Tikkie, PayPal.me, etc.)", 
-        placeholder="STUUR EEN OPEN LINK: bijv. Tikkie (zonder bedrag) of PayPal.me link",
-        style=discord.TextStyle.paragraph,
+class PaymentModal(discord.ui.Modal, title="Betaalvoorkeur"):
+    betaalmethode = discord.ui.TextInput(
+        label="Betaalmethode",
+        placeholder="Bijv. PayPal, Tikkie, Bankoverschrijving...",
         required=True,
-        max_length=150
+        max_length=50,
+    )
+    betaalgegevens = discord.ui.TextInput(
+        label="Betaalgegevens (e-mail/IBAN/telefoon)",
+        placeholder="Bijv. naam@email.com of NL00BANK0123456789",
+        required=True,
+        max_length=150,
     )
 
-    def __init__(self, betaalmethode):
-        super().__init__()
-        self.betaalmethode = betaalmethode
+    async def on_submit(self, interaction: discord.Interaction):
+        methode  = sanitize(self.betaalmethode.value, 50)
+        gegevens = sanitize(self.betaalgegevens.value, 150)
+        await create_ticket(interaction, methode, gegevens)
 
 # ─────────────────────────────────────────────
 #  TICKET AANMAKEN
@@ -411,7 +400,6 @@ async def uitbetaling(interaction: discord.Interaction):
 
     if not category or not isinstance(category, discord.CategoryChannel):
         await interaction.response.send_message("Ticket-categorie niet gevonden. Vraag een admin.", ephemeral=True)
-        log.error(f"TICKET_CATEGORY_ID ({TICKET_CAT_ID}) niet gevonden in guild")
         return
 
     existing = discord.utils.get(category.text_channels, name=f"ticket-{user.name.lower().replace(' ', '-')}")
@@ -421,7 +409,7 @@ async def uitbetaling(interaction: discord.Interaction):
 
     await interaction.response.send_modal(PaymentModal())
 
-async def create_ticket(interaction, betaalmethode, betaalgegevens):
+async def create_ticket(interaction: discord.Interaction, betaalmethode: str, betaalgegevens: str):
     await interaction.response.defer(ephemeral=True)
     guild      = interaction.guild
     user       = interaction.user
@@ -445,18 +433,17 @@ async def create_ticket(interaction, betaalmethode, betaalgegevens):
             name=f"ticket-{user.name.lower().replace(' ', '-')}",
             category=category,
             overwrites=overwrites,
-            topic=f"Ticket:{user.id}|{betaalmethode}:{betaalgegevens}|{datetime.now().strftime('%d/%m/%Y')}",
+            topic=f"Ticket:{user.id}|{betaalmethode}:{betaalgegevens}|{now_local().strftime('%d/%m/%Y')}",
         )
     except discord.Forbidden:
-        await interaction.followup.send("Fout: ik heb geen rechten om kanalen aan te maken.", ephemeral=True)
-        log.error("Geen rechten om ticket-kanaal aan te maken")
+        await interaction.followup.send("Fout: geen rechten om kanalen aan te maken.", ephemeral=True)
         return
     except Exception as e:
         await interaction.followup.send("Er ging iets mis bij het aanmaken van je ticket.", ephemeral=True)
         log.error(f"create_ticket fout: {e}")
         return
 
-    month_name = MONTHS_NL[datetime.now().month - 1]
+    month_name = MONTHS_NL[now_local().month - 1]
     try:
         with open(TEMPLATE_PATH, "rb") as f:
             file_data = f.read()
@@ -467,22 +454,21 @@ async def create_ticket(interaction, betaalmethode, betaalgegevens):
 
     excel_file = discord.File(
         io.BytesIO(file_data),
-        filename=f"Clipfarming_Verdiensten_{month_name}_{datetime.now().year}.xlsx"
+        filename=f"Clipfarming_Verdiensten_{month_name}_{now_local().year}.xlsx"
     )
 
     embed = discord.Embed(
         title="Betalingsticket aangemaakt",
         description=(
             f"Hey {user.mention}! Download het Excel-bestand hierboven en volg de stappen:\n\n"
-            "**1.** Vul het Excel-bestand volledig in.\n"
-            "**2.** Upload het ingevulde bestand in dit ticket.\n"
-            "**3.** **BELANGRIJK:** Zorg dat je betaallink een 'open' link is (Tikkie zonder bedrag of PayPal.me). Wij vullen het bedrag zelf in.\n\n"
-            f"**Geselecteerde methode:** {betaalmethode}\n"
-            f"**Opgegeven Link:** {betaalgegevens}\n\n"
-            "*Wacht tot een stafflid je bestand heeft gecontroleerd.*"
+            "**1.** Vul het Excel-bestand volledig in\n"
+            "**2.** Upload het ingevulde bestand in dit ticket\n"
+            "**3.** Wacht tot een stafflid je bestand heeft gecontroleerd\n\n"
+            f"**Betaalmethode:** {betaalmethode}\n"
+            f"**Betaalgegevens:** {betaalgegevens}"
         ),
         color=0x7b2ff7,
-        timestamp=datetime.utcnow(),
+        timestamp=now_utc(),
     )
     embed.set_footer(text="MONSTERBOT - Ticket systeem")
 
@@ -504,10 +490,10 @@ async def create_ticket(interaction, betaalmethode, betaalgegevens):
             f"**Kanaal:** {channel.mention}\n"
             f"**Betaalmethode:** {betaalmethode}\n"
             f"**Betaalgegevens:** {betaalgegevens}\n"
-            f"**Datum:** {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+            f"**Datum:** {now_local().strftime('%d/%m/%Y %H:%M')}"
         ),
         color=0x7b2ff7,
-        timestamp=datetime.utcnow(),
+        timestamp=now_utc(),
     )
     log_embed.set_footer(text="MONSTERBOT - Ticket Log")
     await send_log(guild, log_embed)
@@ -523,7 +509,7 @@ class TicketCloseView(discord.ui.View):
         self.owner_id = owner_id
 
     @discord.ui.button(label="Ticket sluiten", style=discord.ButtonStyle.danger, custom_id="close_ticket")
-    async def close_ticket(self, interaction, button):
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user) and interaction.user.id != self.owner_id:
             await interaction.response.send_message("Geen toegang.", ephemeral=True)
             return
@@ -535,20 +521,62 @@ class TicketCloseView(discord.ui.View):
             log.error(f"Kon ticket niet sluiten: {e}")
 
 # ─────────────────────────────────────────────
-#  BETAAL KANAAL KNOP (VOOR STAFF)
+#  BETALING ONTVANGEN KNOP (voor gebruiker in ticket)
+# ─────────────────────────────────────────────
+class ConfirmReceiptView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(
+        label="✅ Betaling ontvangen",
+        style=discord.ButtonStyle.success,
+        custom_id="confirm_payment_received"
+    )
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Alleen de eigenaar van dit ticket kan dit bevestigen.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            "✅ Bedankt voor de bevestiging! Dit ticket wordt over **10 seconden** gesloten."
+        )
+
+        log_embed = discord.Embed(
+            title="Betaling bevestigd door gebruiker",
+            description=f"<@{self.user_id}> heeft de ontvangst van de betaling bevestigd.",
+            color=0x00c9a7,
+            timestamp=now_utc(),
+        )
+        log_embed.set_footer(text="MONSTERBOT - Ticket Log")
+        await send_log(interaction.guild, log_embed)
+        log.info(f"Betaling bevestigd door user {self.user_id}")
+
+        await asyncio.sleep(10)
+        try:
+            await interaction.channel.delete(reason="Betaling bevestigd door gebruiker")
+        except Exception as e:
+            log.error(f"Kon ticket niet sluiten na bevestiging: {e}")
+
+# ─────────────────────────────────────────────
+#  BETAAL KANAAL KNOP (voor staff)
 # ─────────────────────────────────────────────
 class PaymentProcessView(discord.ui.View):
-    def __init__(self, user_id, bedrag, discord_naam):
+    def __init__(self, user_id: int, bedrag: str, discord_naam: str):
         super().__init__(timeout=None)
         self.user_id      = user_id
         self.bedrag       = bedrag
         self.discord_naam = discord_naam
 
-    @discord.ui.button(label="Betalen", style=discord.ButtonStyle.primary, emoji="💸", custom_id="mark_as_paid")
+    @discord.ui.button(label="✅ Betaald", style=discord.ButtonStyle.success, emoji="💸", custom_id="mark_as_paid")
     async def mark_as_paid(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("Alleen staff mag dit doen.", ephemeral=True)
             return
+
+        await interaction.response.defer()
 
         log_embed = discord.Embed(
             title="✅ Betaling Voltooid",
@@ -556,42 +584,18 @@ class PaymentProcessView(discord.ui.View):
                 f"**Stafflid:** {interaction.user.mention}\n"
                 f"**Ontvanger:** <@{self.user_id}> ({self.discord_naam})\n"
                 f"**Bedrag:** {self.bedrag}\n"
-                f"**Status:** Uitbetaald en verwijderd uit lijst."
+                f"**Status:** Overgemaakt."
             ),
             color=0x2ecc71,
-            timestamp=datetime.utcnow()
+            timestamp=now_utc(),
         )
         await send_log(interaction.guild, log_embed)
         await interaction.message.delete()
-        log.info(f"Betaling aan {self.discord_naam} voltooid door {interaction.user}")
+        log.info(f"Betaling aan {self.discord_naam} gemarkeerd als betaald door {interaction.user}")
 
 # ─────────────────────────────────────────────
 #  STAFF APPROVAL KNOPPEN
 # ─────────────────────────────────────────────
-class ConfirmReceiptView(discord.ui.View):
-    def __init__(self, user_id):
-        super().__init__(timeout=None)
-        self.user_id = user_id
-
-    @discord.ui.button(label="Ik heb de betaling ontvangen ✅", style=discord.ButtonStyle.success, custom_id="confirm_received")
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Alleen de aanvrager kan dit bevestigen.", ephemeral=True)
-            return
-
-        await interaction.response.send_message("Bedankt voor de bevestiging! Dit ticket wordt over 10 seconden gesloten.")
-        
-        log_embed = discord.Embed(
-            title="Betaling Ontvangen & Ticket Gesloten",
-            description=f"Gebruiker <@{self.user_id}> heeft de ontvangst bevestigd.",
-            color=0x00c9a7,
-            timestamp=datetime.utcnow()
-        )
-        await send_log(interaction.guild, log_embed)
-        
-        await asyncio.sleep(10)
-        await interaction.channel.delete()
-
 class StaffApprovalView(discord.ui.View):
     def __init__(self, total, total_views, discord_naam, user_id, betaalmethode, betaalgegevens):
         super().__init__(timeout=None)
@@ -608,65 +612,138 @@ class StaffApprovalView(discord.ui.View):
             await interaction.response.send_message("Alleen staff.", ephemeral=True)
             return
 
-        # Directe feedback aan de moderator
-        await interaction.response.send_message(f"Verzoek van EUR {self.total:.2f} goedgekeurd. Betaallink is verstuurd naar administratie.", ephemeral=True)
+        await interaction.response.defer()
         self.stop()
 
-        # 1. Stuur naar Betaalkanaal voor de administratie
+        # ── Stap 1: Leaderboard bijwerken ────────────────────────────
+        add_to_leaderboard(self.discord_naam, self.user_id, self.total_views, self.total)
+
+        # ── Stap 2: DM naar de gebruiker — vraag om betaallink ───────
+        try:
+            member = (
+                interaction.guild.get_member(self.user_id)
+                or await interaction.guild.fetch_member(self.user_id)
+            )
+        except Exception as e:
+            log.error(f"Kon member niet ophalen: {e}")
+            member = None
+
+        betaallink_ontvangen = False
+
+        if member:
+            dm_vraag_embed = discord.Embed(
+                title="💰 Je betaalverzoek is goedgekeurd!",
+                description=(
+                    f"Hey **{self.discord_naam}**! Je clipfarming-verzoek van "
+                    f"**EUR {self.total:.2f}** is goedgekeurd. 🎉\n\n"
+                    "**Stuur nu je betaallink als reply op dit bericht.**\n"
+                    "Stuur een Tikkie-link, PayPal.me-link, of een ander betaalverzoek. "
+                    "Wij maken dan het exacte bedrag over.\n\n"
+                    "⏳ Je hebt **10 minuten** om te reageren."
+                ),
+                color=0x00c9a7,
+                timestamp=now_utc(),
+            )
+            dm_vraag_embed.set_footer(text="MONSTERBOT — MonsterTube Clipfarming")
+
+            dm_sent = await send_dm(member, dm_vraag_embed)
+
+            if dm_sent:
+                # Wacht op reply van de gebruiker in DMs
+                def check(m):
+                    return m.author.id == self.user_id and isinstance(m.channel, discord.DMChannel)
+
+                try:
+                    reply = await bot.wait_for("message", check=check, timeout=600)  # 10 minuten
+                    betaallink = sanitize(reply.content, 300)
+                    betaallink_ontvangen = True
+                    log.info(f"Betaallink ontvangen van {member}: {betaallink}")
+                except asyncio.TimeoutError:
+                    timeout_embed = discord.Embed(
+                        title="⏰ Tijd verstreken",
+                        description=(
+                            "Je hebt niet op tijd een betaallink gestuurd.\n"
+                            "Neem contact op met staff via een nieuw ticket."
+                        ),
+                        color=0xff4444,
+                    )
+                    await send_dm(member, timeout_embed)
+                    betaallink = "Geen link ontvangen (timeout)"
+                    log.warning(f"Geen betaallink ontvangen van {member} binnen 10 minuten")
+            else:
+                betaallink = "Kon geen DM sturen — DMs uitgeschakeld"
+        else:
+            betaallink = "Gebruiker niet gevonden"
+
+        # ── Stap 3: Post naar betaalkanaal ───────────────────────────
         if PAYMENT_CH_ID:
             try:
                 pay_ch = interaction.guild.get_channel(PAYMENT_CH_ID)
                 if pay_ch:
-                    link_ruw = self.betaalgegevens.strip()
-                    # Maak er een klikbare link van voor de admin
-                    klikbare_link = link_ruw if link_ruw.startswith("http") else f"https://{link_ruw}"
-                    
                     pay_embed = discord.Embed(
-                        title="💸 Uitbetaling Gereed", 
-                        description=f"Klik op de link en vul het bedrag handmatig in: **EUR {self.total:.2f}**",
-                        color=0x00c9a7, 
-                        timestamp=datetime.utcnow()
+                        title="💸 Nieuwe uitbetaling",
+                        color=0x00c9a7,
+                        timestamp=now_utc(),
                     )
-                    pay_embed.add_field(name="Ontvanger", value=f"{self.discord_naam} (<@{self.user_id}>)", inline=True)
-                    pay_embed.add_field(name="Bedrag", value=f"**EUR {self.total:.2f}**", inline=True)
-                    pay_embed.add_field(name="BETAALLINK", value=f"**[KLIK HIER OM TE BETALEN]({klikbare_link})**", inline=False)
-                    pay_embed.set_footer(text="Klik op 'Betalen' hieronder als je klaar bent.")
-                    
-                    pay_view = PaymentProcessView(user_id=self.user_id, bedrag=f"EUR {self.total:.2f}", discord_naam=self.discord_naam)
+                    pay_embed.add_field(name="Naam",             value=self.discord_naam,         inline=True)
+                    pay_embed.add_field(name="Discord",          value=f"<@{self.user_id}>",      inline=True)
+                    pay_embed.add_field(name="Bedrag",           value=f"**EUR {self.total:.2f}**", inline=True)
+                    pay_embed.add_field(
+                        name="Betaallink",
+                        value=betaallink if betaallink_ontvangen else f"⚠️ {betaallink}",
+                        inline=False,
+                    )
+                    pay_embed.add_field(name="Goedgekeurd door", value=interaction.user.mention,  inline=False)
+                    pay_embed.set_footer(text="Klik op ✅ Betaald als het is overgemaakt.")
+
+                    pay_view = PaymentProcessView(
+                        user_id=self.user_id,
+                        bedrag=f"EUR {self.total:.2f}",
+                        discord_naam=self.discord_naam,
+                    )
                     await pay_ch.send(embed=pay_embed, view=pay_view)
             except Exception as e:
                 log.error(f"Fout bij sturen naar betaalkanaal: {e}")
 
-        # 2. Update Leaderboard
-        add_to_leaderboard(self.discord_naam, self.user_id, self.total_views, self.total)
+        # ── Stap 4: Embed in het ticket — betaling onderweg ──────────
+        ticket_embed = discord.Embed(
+            title="💸 Betaling is onderweg!",
+            description=(
+                f"<@{self.user_id}> Je verzoek van **EUR {self.total:.2f}** is goedgekeurd "
+                f"en de betaling wordt nu verwerkt.\n\n"
+                "**Zodra je het geld hebt ontvangen, klik je op de knop hieronder.**\n"
+                "Het ticket sluit daarna automatisch."
+            ),
+            color=0x00c9a7,
+            timestamp=now_utc(),
+        )
+        ticket_embed.set_footer(text="MONSTERBOT — Klik op de knop zodra je betaling binnen is.")
 
-        # 3. Log de actie in het log-kanaal
+        try:
+            await interaction.channel.send(
+                content=f"<@{self.user_id}>",
+                embed=ticket_embed,
+                view=ConfirmReceiptView(user_id=self.user_id),
+            )
+        except Exception as e:
+            log.error(f"Fout bij sturen ticket-embed na goedkeuring: {e}")
+
+        # ── Stap 5: Log ──────────────────────────────────────────────
         log_embed = discord.Embed(
             title="Betaling goedgekeurd",
-            description=f"**Door:** {interaction.user.mention}\n**Bedrag:** EUR {self.total:.2f}\n**Ontvanger:** <@{self.user_id}>",
-            color=0x00c9a7,
-            timestamp=datetime.utcnow()
-        )
-        await send_log(interaction.guild, log_embed)
-
-        # 4. BERICHT VOOR DE GEBRUIKER (Ticket blijft open!)
-        confirm_embed = discord.Embed(
-            title="Betaling is onderweg! 💸",
             description=(
-                f"Je verzoek van **EUR {self.total:.2f}** is goedgekeurd.\n"
-                "De administratie maakt het bedrag nu naar je over.\n\n"
-                "**⚠️ BEVESTIGING NODIG:**\n"
-                "Klik op de knop hieronder **zodra je het geld hebt ontvangen**.\n"
-                "Hiermee laat je ons weten dat alles goed is gegaan en **sluit je dit ticket**."
+                f"**Door:** {interaction.user.mention}\n"
+                f"**Bedrag:** EUR {self.total:.2f}\n"
+                f"**Ontvanger:** <@{self.user_id}>\n"
+                f"**Betaallink:** {betaallink}\n"
+                f"**Datum:** {now_local().strftime('%d/%m/%Y %H:%M')}"
             ),
-            color=0x7b2ff7
+            color=0x00c9a7,
+            timestamp=now_utc(),
         )
-        # De gebruiker krijgt nu de knop om zelf te sluiten
-        await interaction.channel.send(
-            content=f"<@{self.user_id}>", 
-            embed=confirm_embed, 
-            view=ConfirmReceiptView(user_id=self.user_id)
-        )
+        log_embed.set_footer(text="MONSTERBOT - Ticket Log")
+        await send_log(interaction.guild, log_embed)
+        log.info(f"Betaling goedgekeurd door {interaction.user} — EUR {self.total:.2f}")
 
     @discord.ui.button(label="Afwijzen", style=discord.ButtonStyle.danger, custom_id="reject_pay")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -683,16 +760,32 @@ class StaffApprovalView(discord.ui.View):
         try:
             new_name = f"nakijken-{interaction.channel.name.replace('ticket-', '')}"
             await interaction.channel.edit(name=new_name)
-        except Exception:
-            pass
-        
+        except Exception as e:
+            log.warning(f"Kon kanaal niet hernoemen: {e}")
+
         embed = discord.Embed(
             title="Moet worden nagekeken",
-            description=f"Dit ticket is gemarkeerd als **na te kijken** door {interaction.user.mention}.",
+            description=(
+                f"Dit ticket is gemarkeerd als **te nakijken** door {interaction.user.mention}.\n"
+                "Staff zal dit zo snel mogelijk controleren."
+            ),
             color=0xf0a500,
-            timestamp=datetime.utcnow(),
+            timestamp=now_utc(),
         )
         await interaction.response.send_message(embed=embed)
+
+        log_embed = discord.Embed(
+            title="Ticket gemarkeerd: Nakijken",
+            description=(
+                f"**Door:** {interaction.user.mention}\n"
+                f"**Kanaal:** {interaction.channel.mention}\n"
+                f"**Datum:** {now_local().strftime('%d/%m/%Y %H:%M')}"
+            ),
+            color=0xf0a500,
+            timestamp=now_utc(),
+        )
+        log_embed.set_footer(text="MONSTERBOT - Ticket Log")
+        await send_log(interaction.guild, log_embed)
 
 
 class RejectModal(discord.ui.Modal, title="Afwijzingsreden"):
@@ -709,10 +802,9 @@ class RejectModal(discord.ui.Modal, title="Afwijzingsreden"):
         self.user_id      = user_id
         self.discord_naam = discord_naam
 
-    async def on_submit(self, interaction):
+    async def on_submit(self, interaction: discord.Interaction):
         reden_clean = sanitize(self.reden.value, 500)
 
-        # Embed in het ticket
         embed = discord.Embed(
             title="Afgewezen",
             description=f"**Reden:** {reden_clean}\n\nPas je inzending aan en probeer opnieuw.",
@@ -720,9 +812,12 @@ class RejectModal(discord.ui.Modal, title="Afwijzingsreden"):
         )
         await interaction.response.send_message(embed=embed)
 
-        # ── DM naar de gebruiker ──────────────────────────────────────
+        # DM naar de gebruiker
         try:
-            member = interaction.guild.get_member(self.user_id) or await interaction.guild.fetch_member(self.user_id)
+            member = (
+                interaction.guild.get_member(self.user_id)
+                or await interaction.guild.fetch_member(self.user_id)
+            )
             dm_embed = discord.Embed(
                 title="❌ Betaalverzoek afgewezen",
                 description=(
@@ -731,23 +826,22 @@ class RejectModal(discord.ui.Modal, title="Afwijzingsreden"):
                     "Pas je inzending aan en maak een nieuw ticket aan."
                 ),
                 color=0xff4444,
-                timestamp=datetime.utcnow(),
+                timestamp=now_utc(),
             )
             dm_embed.set_footer(text="MONSTERBOT — MonsterTube Clipfarming")
             await send_dm(member, dm_embed)
         except Exception as e:
             log.warning(f"Kon member niet ophalen voor DM bij afwijzing: {e}")
-        # ─────────────────────────────────────────────────────────────
 
         log_embed = discord.Embed(
             title="Betaling afgewezen",
             description=(
                 f"**Door:** {interaction.user.mention}\n"
                 f"**Reden:** {reden_clean}\n"
-                f"**Datum:** {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                f"**Datum:** {now_local().strftime('%d/%m/%Y %H:%M')}"
             ),
             color=0xff4444,
-            timestamp=datetime.utcnow(),
+            timestamp=now_utc(),
         )
         log_embed.set_footer(text="MONSTERBOT - Ticket Log")
         await send_log(interaction.guild, log_embed)
@@ -760,6 +854,11 @@ class RejectModal(discord.ui.Modal, title="Afwijzingsreden"):
 async def on_message(message):
     if message.author.bot:
         return
+
+    # DM-berichten worden afgehandeld via wait_for — niet hier verwerken
+    if isinstance(message.channel, discord.DMChannel):
+        return
+
     if not message.channel.category or message.channel.category.id != TICKET_CAT_ID:
         await bot.process_commands(message)
         return
@@ -825,22 +924,25 @@ async def on_message(message):
                 f"**Naam:** {data['discord_naam']}\n"
                 f"**Clips:** {len(data['clips'])}\n"
                 f"**Totaal:** EUR {data['total']:.2f}\n"
-                f"**Datum:** {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                f"**Datum:** {now_local().strftime('%d/%m/%Y %H:%M')}"
             ),
             color=0xf0a500,
-            timestamp=datetime.utcnow(),
+            timestamp=now_utc(),
         )
         log_embed.set_footer(text="MONSTERBOT - Ticket Log")
         if LOG_CHANNEL_ID:
             try:
                 log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
                 if log_ch:
-                    excel_file = discord.File(io.BytesIO(file_bytes), filename=f"{message.author.name}_{datetime.now().strftime('%d-%m-%Y_%H-%M')}.xlsx")
+                    excel_file = discord.File(
+                        io.BytesIO(file_bytes),
+                        filename=f"{message.author.name}_{now_local().strftime('%d-%m-%Y_%H-%M')}.xlsx"
+                    )
                     await log_ch.send(embed=log_embed, file=excel_file)
             except Exception as e:
                 log.error(f"Fout bij log Excel upload: {e}")
 
-        log.info(f"Excel ingediend door {message.author} - EUR {data['total']:.2f}")
+        log.info(f"Excel ingediend door {message.author} — EUR {data['total']:.2f}")
 
     await bot.process_commands(message)
 
@@ -860,14 +962,18 @@ async def post_leaderboard(guild, month_key):
         entries     = sorted(data[month_key].values(), key=lambda x: x["views"], reverse=True)[:10]
         year, month = month_key.split("-")
         month_name  = MONTHS_NL[int(month) - 1]
-        embed = discord.Embed(title=f"Leaderboard - {month_name} {year}", color=0xf0a500, timestamp=datetime.utcnow())
+        embed = discord.Embed(
+            title=f"Leaderboard — {month_name} {year}",
+            color=0xf0a500,
+            timestamp=now_utc(),
+        )
         medals      = ["1","2","3","4","5","6","7","8","9","10"]
         views_lines = []
         earn_lines  = []
         for i, entry in enumerate(entries):
             m = medals[i] if i < len(medals) else f"{i+1}."
-            views_lines.append(f"#{m} **{entry['naam']}** - {entry['views']:,} views")
-            earn_lines.append( f"#{m} **{entry['naam']}** - EUR {entry['earnings']:.2f}")
+            views_lines.append(f"#{m} **{entry['naam']}** — {entry['views']:,} views")
+            earn_lines.append( f"#{m} **{entry['naam']}** — EUR {entry['earnings']:.2f}")
         embed.add_field(name="Views",       value="\n".join(views_lines) or "Geen data", inline=True)
         embed.add_field(name="Verdiensten", value="\n".join(earn_lines)  or "Geen data", inline=True)
         await channel.send(embed=embed)
@@ -886,7 +992,7 @@ async def leaderboard_cmd(interaction: discord.Interaction):
 @tasks.loop(hours=1)
 async def check_monthly_leaderboard():
     try:
-        now      = datetime.now()
+        now      = now_local()
         last_day = calendar.monthrange(now.year, now.month)[1]
         if now.day == last_day and now.hour == 22:
             for guild in bot.guilds:
@@ -895,7 +1001,7 @@ async def check_monthly_leaderboard():
         log.error(f"check_monthly_leaderboard fout: {e}")
 
 # ─────────────────────────────────────────────
-#  STAFF COMMANDS (GLOBAL)
+#  STAFF COMMANDS
 # ─────────────────────────────────────────────
 @tree.command(name="bot_aan", description="[Staff] Zet de bot aan voor alle gebruikers.")
 async def bot_aan(interaction: discord.Interaction):
@@ -919,7 +1025,10 @@ async def bot_status(interaction: discord.Interaction):
         await interaction.response.send_message("Alleen staff.", ephemeral=True)
         return
     state = load_state(); enabled = state.get("bot_enabled", True)
-    await interaction.response.send_message(f"Status: {'OPEN' if is_bot_open() else 'GESLOTEN'} (Handmatig: {'AAN' if enabled else 'UIT'})", ephemeral=True)
+    await interaction.response.send_message(
+        f"Status: {'OPEN' if is_bot_open() else 'GESLOTEN'} (Handmatig: {'AAN' if enabled else 'UIT'})",
+        ephemeral=True,
+    )
 
 @tree.command(name="betaald", description="[Staff] Markeer ticket als betaald en sluit het.")
 @app_commands.describe(bedrag="Uitbetaald bedrag in euros")
