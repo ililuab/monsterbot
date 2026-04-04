@@ -39,8 +39,9 @@ def get_env_int(key):
 
 TOKEN              = os.getenv("DISCORD_TOKEN", "").strip()
 GUILD_ID           = get_env_int("GUILD_ID")
-TICKET_CAT_ID      = get_env_int("TICKET_CATEGORY_ID")
-STAFF_ROLE_ID      = get_env_int("STAFF_ROLE_ID")
+TICKET_CAT_ID       = get_env_int("TICKET_CATEGORY_ID")
+TICKET_BUTTON_CH_ID = get_env_int("TICKET_BUTTON_CHANNEL_ID")
+STAFF_ROLE_ID       = get_env_int("STAFF_ROLE_ID")
 LOG_CHANNEL_ID     = get_env_int("LOG_CHANNEL_ID")
 LEADERBOARD_CH_ID  = get_env_int("LEADERBOARD_CHANNEL_ID")
 PAYMENT_CH_ID      = get_env_int("PAYMENT_CHANNEL_ID")
@@ -366,6 +367,70 @@ def bot_closed_embed():
 # ─────────────────────────────────────────────
 #  BETAALVOORKEUR MODAL
 # ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
+#  TICKET KNOP (gepost in ticket-button kanaal)
+# ─────────────────────────────────────────────
+class TicketButtonView(discord.ui.View):
+    """Persistente knop die in het ticket-aanmaken kanaal staat."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="📋 Maak betaalticket aan",
+        style=discord.ButtonStyle.primary,
+        custom_id="open_ticket_button",
+    )
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_bot_open() and not is_staff(interaction.user):
+            await interaction.response.send_message(embed=bot_closed_embed(), ephemeral=True)
+            return
+
+        category = interaction.guild.get_channel(TICKET_CAT_ID)
+        if not category or not isinstance(category, discord.CategoryChannel):
+            await interaction.response.send_message(
+                "Ticket-categorie niet gevonden. Vraag een admin.", ephemeral=True
+            )
+            return
+
+        existing = discord.utils.get(
+            category.text_channels,
+            name=f"ticket-{interaction.user.name.lower().replace(' ', '-')}",
+        )
+        if existing:
+            await interaction.response.send_message(
+                f"Je hebt al een open ticket: {existing.mention}", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(PaymentModal())
+
+
+async def post_ticket_button(guild: discord.Guild):
+    """Post de ticket-knop in het ingestelde kanaal bij opstarten."""
+    if not TICKET_BUTTON_CH_ID:
+        log.warning("TICKET_BUTTON_CHANNEL_ID niet ingesteld — knop wordt niet gepost")
+        return
+    ch = guild.get_channel(TICKET_BUTTON_CH_ID)
+    if not ch:
+        log.error(f"Ticket-button kanaal ({TICKET_BUTTON_CH_ID}) niet gevonden")
+        return
+
+    embed = discord.Embed(
+        title="💰 Clipfarming Uitbetaling",
+        description=(
+            "Wil je je clip-verdiensten uitbetaald krijgen?\n\n"
+            "Klik op de knop hieronder om een betaalticket aan te maken.\n"
+            "Je ontvangt dan een Excel-bestand dat je invult en terugstuurt.\n\n"
+            "⏰ **Let op:** tickets kunnen alleen in de **eerste 4 dagen van de maand** worden aangemaakt."
+        ),
+        color=0x7b2ff7,
+    )
+    embed.set_footer(text="MONSTERBOT — MonsterTube Clipfarming")
+    await ch.send(embed=embed, view=TicketButtonView())
+    log.info(f"Ticket-knop gepost in #{ch.name}")
+
+
 class PaymentModal(discord.ui.Modal, title="Betaalvoorkeur"):
     betaalmethode = discord.ui.TextInput(
         label="Betaalmethode",
@@ -1060,11 +1125,18 @@ async def afwijzen(interaction: discord.Interaction, reden: str = "Geen reden"):
 @bot.event
 async def on_ready():
     log.info(f"Ingelogd als {bot.user}")
+    # Registreer persistente views zodat knoppen werken na herstart
+    bot.add_view(TicketButtonView())
+    bot.add_view(TicketCloseView(owner_id=0))
+    bot.add_view(ConfirmReceiptView(user_id=0))
     try:
         synced = await tree.sync()
         log.info(f"{len(synced)} slash commands globaal gesynchroniseerd")
     except Exception as e:
         log.error(f"Sync mislukt: {e}")
     check_monthly_leaderboard.start()
+    # Post ticket-knop in het juiste kanaal
+    for guild in bot.guilds:
+        await post_ticket_button(guild)
 
 bot.run(TOKEN, log_handler=None)
