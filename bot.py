@@ -683,62 +683,45 @@ class StaffApprovalView(discord.ui.View):
         # ── Stap 1: Leaderboard bijwerken ────────────────────────────
         add_to_leaderboard(self.discord_naam, self.user_id, self.total_views, self.total)
 
-        # ── Stap 2: DM naar de gebruiker — vraag om betaallink ───────
-        try:
-            member = (
-                interaction.guild.get_member(self.user_id)
-                or await interaction.guild.fetch_member(self.user_id)
-            )
-        except Exception as e:
-            log.error(f"Kon member niet ophalen: {e}")
-            member = None
+        # ── Stap 2: Vraag betaallink in het ticket ───────────────────
+        ticket_channel = interaction.channel
+        vraag_embed = discord.Embed(
+            title="✅ Goedgekeurd — stuur je betaallink!",
+            description=(
+                f"<@{self.user_id}> Je verzoek van **EUR {self.total:.2f}** is goedgekeurd! 🎉\n\n"
+                "**Stuur nu je betaallink in dit ticket.**\n"
+                "Bijv. een Tikkie-link, PayPal.me-link, of een ander betaalverzoek.\n"
+                "Wij maken dan het exacte bedrag over.\n\n"
+                "Stuur je link zodra je klaar bent, er is geen tijdslimiet."
+            ),
+            color=0x00c9a7,
+            timestamp=now_utc(),
+        )
+        vraag_embed.set_footer(text="MONSTERBOT — Stuur alleen de link, geen andere tekst.")
+        await ticket_channel.send(content=f"<@{self.user_id}>", embed=vraag_embed)
+
+        # Wacht op bericht van de gebruiker in het ticket
+        def check(m):
+            return m.author.id == self.user_id and m.channel.id == ticket_channel.id
 
         betaallink_ontvangen = False
+        try:
+            reply = await bot.wait_for("message", check=check)
+            betaallink = sanitize(reply.content, 300)
+            betaallink_ontvangen = True
+            log.info(f"Betaallink ontvangen van {self.discord_naam}: {betaallink}")
 
-        if member:
-            dm_vraag_embed = discord.Embed(
-                title="💰 Je betaalverzoek is goedgekeurd!",
-                description=(
-                    f"Hey **{self.discord_naam}**! Je clipfarming-verzoek van "
-                    f"**EUR {self.total:.2f}** is goedgekeurd. 🎉\n\n"
-                    "**Stuur nu je betaallink als reply op dit bericht.**\n"
-                    "Stuur een Tikkie-link, PayPal.me-link, of een ander betaalverzoek. "
-                    "Wij maken dan het exacte bedrag over.\n\n"
-                    "⏳ Je hebt **10 minuten** om te reageren."
-                ),
-                color=0x00c9a7,
+            bevestig_embed = discord.Embed(
+                title="🔗 Betaallink ontvangen",
+                description=f"Link ontvangen: `{betaallink}`\n\nWe verwerken de betaling nu zo snel mogelijk!",
+                color=0x7b2ff7,
                 timestamp=now_utc(),
             )
-            dm_vraag_embed.set_footer(text="MONSTERBOT — MonsterTube Clipfarming")
+            await ticket_channel.send(embed=bevestig_embed)
 
-            dm_sent = await send_dm(member, dm_vraag_embed)
-
-            if dm_sent:
-                # Wacht op reply van de gebruiker in DMs
-                def check(m):
-                    return m.author.id == self.user_id and isinstance(m.channel, discord.DMChannel)
-
-                try:
-                    reply = await bot.wait_for("message", check=check, timeout=600)  # 10 minuten
-                    betaallink = sanitize(reply.content, 300)
-                    betaallink_ontvangen = True
-                    log.info(f"Betaallink ontvangen van {member}: {betaallink}")
-                except asyncio.TimeoutError:
-                    timeout_embed = discord.Embed(
-                        title="⏰ Tijd verstreken",
-                        description=(
-                            "Je hebt niet op tijd een betaallink gestuurd.\n"
-                            "Neem contact op met staff via een nieuw ticket."
-                        ),
-                        color=0xff4444,
-                    )
-                    await send_dm(member, timeout_embed)
-                    betaallink = "Geen link ontvangen (timeout)"
-                    log.warning(f"Geen betaallink ontvangen van {member} binnen 10 minuten")
-            else:
-                betaallink = "Kon geen DM sturen — DMs uitgeschakeld"
-        else:
-            betaallink = "Gebruiker niet gevonden"
+        except Exception as e:
+            betaallink = f"Fout bij ophalen link: {e}"
+            log.error(f"Fout bij wait_for betaallink: {e}")
 
         # ── Stap 3: Post naar betaalkanaal ───────────────────────────
         if PAYMENT_CH_ID:
@@ -918,10 +901,6 @@ class RejectModal(discord.ui.Modal, title="Afwijzingsreden"):
 @bot.event
 async def on_message(message):
     if message.author.bot:
-        return
-
-    # DM-berichten worden afgehandeld via wait_for — niet hier verwerken
-    if isinstance(message.channel, discord.DMChannel):
         return
 
     if not message.channel.category or message.channel.category.id != TICKET_CAT_ID:
