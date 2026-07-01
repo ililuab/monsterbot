@@ -71,8 +71,7 @@ bot  = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 # ─────────────────────────────────────────────
-#  WACHTENDE BETAALLINK-VERZOEKEN
-#  { user_id: { "bedrag": float, "naam": str, "ticket_channel_id": int, "guild_id": int } }
+#  WACHTENDE BETAALLINK-VERZOEKEN (niet gebruikt)
 # ─────────────────────────────────────────────
 pending_payment_links: dict[int, dict] = {}
 
@@ -113,10 +112,18 @@ def is_bot_open():
 # ─────────────────────────────────────────────
 #  LEADERBOARD DATA
 # ─────────────────────────────────────────────
-def calc_earnings(views):
-    if views >= 1_000_000:
-        return 250.0
-    return float(views // 10_000)
+def calc_earnings(views, clip_type="vlog"):
+    """
+    Bereken het bedrag op basis van views en clip_type.
+    - stream: €1,50 per 10.000 views
+    - vlog:   €1,00 per 10.000 views
+    Geen maximum, lineaire schaal.
+    """
+    if clip_type.lower() == "stream":
+        rate = 1.5
+    else:
+        rate = 1.0
+    return (views // 10_000) * rate
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -219,21 +226,21 @@ def parse_submission(file_bytes):
             for row in ws.iter_rows(min_row=4, max_row=200, max_col=6):
                 naam_cell    = row[0].value if len(row) > 0 else None
                 email_cell   = row[1].value if len(row) > 1 else None
-                platform_val = row[2].value if len(row) > 2 else None
-                link_val     = row[3].value if len(row) > 3 else None
-                views_val    = row[4].value if len(row) > 4 else None
+                type_cell    = row[2].value if len(row) > 2 else None  # Type: Stream of Vlog
+                link_cell    = row[3].value if len(row) > 3 else None
+                views_cell   = row[4].value if len(row) > 4 else None
 
-                if not views_val or str(views_val).strip() in ("", "Views (werkelijk)", "Views"):
+                if not views_cell or str(views_cell).strip() in ("", "Views (werkelijk)", "Views"):
                     continue
-                views_str = str(views_val).strip()
+                views_str = str(views_cell).strip()
                 if views_str.startswith("[") or views_str.startswith("="):
                     continue
 
                 try:
-                    if isinstance(views_val, (int, float)):
-                        views = int(views_val)
+                    if isinstance(views_cell, (int, float)):
+                        views = int(views_cell)
                     else:
-                        clean_val = str(views_val).strip().replace(" ", "")
+                        clean_val = str(views_cell).strip().replace(" ", "")
                         if "," in clean_val and "." in clean_val:
                             clean_val = clean_val.replace(".", "").replace(",", ".")
                         elif "," in clean_val:
@@ -244,6 +251,7 @@ def parse_submission(file_bytes):
                 except (ValueError, OverflowError, TypeError):
                     continue
 
+                # Discord naam en e-mail uit de eerste rij halen
                 if not discord_naam and naam_cell:
                     naam_str = str(naam_cell).strip()
                     if "[Vul" not in naam_str and naam_str:
@@ -253,17 +261,21 @@ def parse_submission(file_bytes):
                     if "[Vul" not in email_str and email_str:
                         email = sanitize(email_str, 100)
 
+                # Type bepalen (kolom C)
+                type_str = str(type_cell).strip().lower() if type_cell else ""
+                clip_type = "stream" if "stream" in type_str else "vlog"
+
                 floored = (views // 10_000) * 10_000
-                earning = calc_earnings(floored)
+                earning = calc_earnings(floored, clip_type)
                 total       += earning
                 total_views += floored
 
-                link = sanitize(link_val, 200) if link_val else ""
+                link = sanitize(link_cell, 200) if link_cell else ""
                 if link and not link.startswith(("http://", "https://")):
                     link = "Ongeldige link"
 
                 results.append({
-                    "platform": sanitize(platform_val, 30) if platform_val else "Onbekend",
+                    "type":     clip_type,
                     "link":     link,
                     "views":    views,
                     "floored":  floored,
@@ -309,10 +321,11 @@ def build_summary_embed(data, user):
     field_count = 1
 
     for i, c in enumerate(clips[:20], 1):
+        type_display = "Stream" if c["type"] == "stream" else "Vlog"
         afgerond = f" *(afgerond naar {c['floored']:,})*" if c["views"] != c["floored"] else ""
         link_display = c['link'][:40] + ('...' if len(c['link']) > 40 else '')
         line = (
-            f"`{i}.` **{c['platform']}** | {c['views']:,} views{afgerond} - EUR {c['earning']:.2f}\n"
+            f"`{i}.` **{type_display}** | {c['views']:,} views{afgerond} - EUR {c['earning']:.2f}\n"
             f"   {link_display}\n"
         )
         if len(current_field_content) + len(line) > 1000:
@@ -336,21 +349,28 @@ def build_prijslijst_embed():
     embed = discord.Embed(
         title="Prijslijst",
         description=(
-            "EUR 1 per 10.000 views - altijd afgerond naar beneden.\n"
-            "Views gelden voor een termijn van 1 maand.\n"
-            "Voorbeeld: 16.000 views = 10.000 = EUR 1"
+            "**Streamclips:** €1,50 per 10.000 views\n"
+            "**Vlogclips:**  €1,00 per 10.000 views\n\n"
+            "Views worden altijd afgerond naar beneden (per 10.000).\n"
+            "Voorbeeld: 16.000 views = 10.000 views = €1,50 (stream) of €1,00 (vlog).\n\n"
+            "📌 **Geef in de Excel-kolom 'Type' aan of het een stream- of vlogclip is.**"
         ),
         color=0x00c9a7,
     )
-    embed.add_field(name="Tarieven", value="\n".join([
-        "10.000 views → EUR 1",
-        "20.000 views → EUR 2",
-        "50.000 views → EUR 5",
-        "100.000 views → EUR 10",
-        "250.000 views → EUR 25",
-        "500.000 views → EUR 50",
-        "1.000.000 views → EUR 250",
-    ]), inline=False)
+    embed.add_field(
+        name="Voorbeelden",
+        value=(
+            "**Stream:**\n"
+            "10.000 views → €1,50\n"
+            "50.000 views → €7,50\n"
+            "100.000 views → €15,00\n\n"
+            "**Vlog:**\n"
+            "10.000 views → €1,00\n"
+            "50.000 views → €5,00\n"
+            "100.000 views → €10,00"
+        ),
+        inline=False
+    )
     return embed
 
 def bot_closed_embed():
@@ -363,10 +383,6 @@ def bot_closed_embed():
         ),
         color=0xff4444,
     )
-
-# ─────────────────────────────────────────────
-#  BETAALVOORKEUR MODAL
-# ─────────────────────────────────────────────
 
 # ─────────────────────────────────────────────
 #  TICKET KNOP (gepost in ticket-button kanaal)
@@ -422,7 +438,8 @@ async def post_ticket_button(guild: discord.Guild):
             "Wil je je clip-verdiensten uitbetaald krijgen?\n\n"
             "Klik op de knop hieronder om een betaalticket aan te maken.\n"
             "Je ontvangt dan een Excel-bestand dat je invult en terugstuurt.\n\n"
-            "⏰ **Let op:** tickets kunnen alleen in de **eerste 4 dagen van de maand** worden aangemaakt."
+            "⏰ **Let op:** tickets kunnen alleen in de **eerste 4 dagen van de maand** worden aangemaakt.\n"
+            "📌 **Gebruik de nieuwe template:** kolom C = Type (Stream of Vlog)."
         ),
         color=0x7b2ff7,
     )
@@ -530,7 +547,8 @@ async def create_ticket(interaction: discord.Interaction, betaalmethode: str, be
             "**2.** Upload het ingevulde bestand in dit ticket\n"
             "**3.** Wacht tot een stafflid je bestand heeft gecontroleerd\n\n"
             f"**Betaalmethode:** {betaalmethode}\n"
-            f"**Betaalgegevens:** {betaalgegevens}"
+            f"**Betaalgegevens:** {betaalgegevens}\n\n"
+            "📌 **Let op:** in kolom C vul je 'Stream' of 'Vlog' in."
         ),
         color=0x7b2ff7,
         timestamp=now_utc(),
@@ -921,7 +939,8 @@ async def on_message(message):
         if not data:
             embed = discord.Embed(
                 title="Bestand niet leesbaar",
-                description="Gebruik het meegeleverde template en vul de Views-kolom correct in.",
+                description="Gebruik het meegeleverde template en vul de Views-kolom correct in.\n"
+                            "Zorg dat kolom C 'Type' bevat (Stream of Vlog).",
                 color=0xff8c00,
             )
             await message.channel.send(embed=embed)
